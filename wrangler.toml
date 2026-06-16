@@ -7,12 +7,12 @@ compatibility_flags = ["nodejs_compat"]
 [[d1_databases]]
 binding = "HADES_D1"
 database_name = "hades-db"
-database_id = "YOUR_D1_DATABASE_ID"
+database_id = "hades-db"
 
 # Cloudflare KV Namespace
 [[kv_namespaces]]
 binding = "HADES_KV"
-id = "YOUR_KV_NAMESPACE_ID"
+id = "HADES_KV"
 
 # Environment Variables (non-secret)
 [vars]
