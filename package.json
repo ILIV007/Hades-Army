@@ -1,0 +1,27 @@
+{
+  "name": "hades-army",
+  "version": "1.0.0",
+  "description": "Hades Army — Multi-Agent AI Software Development Team",
+  "main": "src/worker.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:migrate": "wrangler d1 execute hades-db --file=./src/database/schema.sql",
+    "db:migrate:local": "wrangler d1 execute hades-db --file=./src/database/schema.sql --local",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "github",
+    "telegram",
+    "cloudflare-workers"
+  ],
+  "author": "Hades Army",
+  "license": "MIT",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240614.0",
+    "typescript": "^5.5.0",
+    "wrangler": "^3.60.0"
+  }
+}
