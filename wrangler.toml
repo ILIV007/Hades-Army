@@ -4,15 +4,15 @@ compatibility_date = "2026-06-16"
 compatibility_flags = ["nodejs_compat"]
 
 # Cloudflare D1 Database
-[[d1_databases]]
-binding = "HADES_D1"
-database_name = "hades-db"
-database_id = "hades-db"
+#[[d1_databases]]
+#binding = "HADES_D1"
+#database_name = "hades-db"
+#database_id = "hades-db"
 
 # Cloudflare KV Namespace
-[[kv_namespaces]]
-binding = "HADES_KV"
-id = "HADES_KV"
+#[[kv_namespaces]]
+#binding = "HADES_KV"
+#id = "HADES_KV"
 
 # Environment Variables (non-secret)
 [vars]
