@@ -1,237 +1,238 @@
 /**
- * Hades Army — Orchestrator
- * High-level coordinator that wires all components together.
+ * Hades Army v0.2 — Orchestrator
+ * High-level coordinator wiring all components together.
+ * Pure ESM.
  */
 
-import type { HadesEnv } from '../config/env';
-import { ManagerAgent } from './manager';
-import { WorkflowEngine } from './workflow';
-import { TelegramService } from '../services/telegram.service';
-import { Logger } from '../utils/logger';
+import type { HadesEnv } from "../config/env";
+import { ProjectManager } from "./managers/project.manager";
+import { TaskPlanner } from "./managers/task.planner";
+import { ExecutionCoordinator } from "./managers/execution.coordinator";
+import { ApprovalHandler } from "./managers/approval.handler";
+import { TelegramService } from "../services/telegram.service";
+import { Logger } from "../utils/logger";
+import { D1Client } from "../memory/d1.client";
+import { KVClient } from "../memory/kv.client";
 
 export class Orchestrator {
-  private manager: ManagerAgent;
+  private projectManager: ProjectManager;
+  private taskPlanner: TaskPlanner;
+  private executionCoordinator: ExecutionCoordinator;
+  private approvalHandler: ApprovalHandler;
   private telegram: TelegramService;
   private logger: Logger;
+  private d1: D1Client;
+  private kv: KVClient;
 
   constructor(private env: HadesEnv) {
-    this.manager = new ManagerAgent(env);
+    this.projectManager = new ProjectManager(env);
+    this.taskPlanner = new TaskPlanner(env);
+    this.executionCoordinator = new ExecutionCoordinator(env);
+    this.approvalHandler = new ApprovalHandler(env);
     this.telegram = new TelegramService(env);
     this.logger = new Logger(env);
+    this.d1 = new D1Client(env);
+    this.kv = new KVClient(env);
   }
 
-  /**
-   * Handle incoming Telegram message.
-   */
   async handleTelegramMessage(userId: number, chatId: number, text: string): Promise<void> {
-    await this.logger.info('orchestrator', `Message from ${userId}: ${text.slice(0, 100)}`);
+    await this.logger.info("orchestrator", `Message from ${userId}: ${text.slice(0, 100)}`);
 
-    // Handle commands
-    if (text.startsWith('/')) {
+    if (text.startsWith("/")) {
       await this.handleCommand(userId, chatId, text);
       return;
     }
 
-    // Handle callback queries (inline buttons)
-    if (text.startsWith('approve:') || text.startsWith('reject:') || text.startsWith('changes:')) {
+    if (text.startsWith("approve:") || text.startsWith("reject:") || text.startsWith("changes:")) {
       await this.handleCallback(userId, chatId, text);
       return;
     }
 
-    // Handle natural language request
-    const response = await this.manager.handleUserRequest(userId, chatId, text);
-    await this.telegram.sendMessage(chatId, response);
+    await this.handleNaturalLanguage(userId, chatId, text);
   }
 
-  /**
-   * Handle bot commands.
-   */
   private async handleCommand(userId: number, chatId: number, text: string): Promise<void> {
-    const [command, ...args] = text.slice(1).split(' ');
+    const [command, ...args] = text.slice(1).split(" ");
 
     switch (command.toLowerCase()) {
-      case 'newproject':
-        await this.handleNewProject(userId, chatId, args);
+      case "newproject":
+        await this.cmdNewProject(userId, chatId, args);
         break;
-
-      case 'projects':
-        await this.handleListProjects(userId, chatId);
+      case "projects":
+        await this.cmdProjects(userId, chatId);
         break;
-
-      case 'status':
-        await this.handleStatus(userId, chatId);
+      case "status":
+        await this.cmdStatus(userId, chatId);
         break;
-
-      case 'tasks':
-        await this.handleTasks(userId, chatId);
+      case "tasks":
+        await this.cmdTasks(userId, chatId);
         break;
-
-      case 'help':
-        await this.handleHelp(chatId);
+      case "help":
+        await this.cmdHelp(chatId);
         break;
-
-      case 'start':
-        await this.handleStart(chatId);
+      case "start":
+        await this.cmdStart(chatId);
         break;
-
       default:
-        await this.telegram.sendMessage(chatId, `⚠️ Unknown command: /${command}\nUse /help for available commands.`);
+        await this.telegram.sendMessage(chatId, `⚠️ Unknown: /${command}\nUse /help`);
     }
   }
 
-  /**
-   * Handle inline callback queries (approval buttons).
-   */
   private async handleCallback(userId: number, chatId: number, data: string): Promise<void> {
-    const [action, taskId] = data.split(':');
+    const [action, taskId] = data.split(":");
+    if (!taskId) { await this.telegram.sendMessage(chatId, "⚠️ Invalid"); return; }
 
-    if (!taskId) {
-      await this.telegram.sendMessage(chatId, '⚠️ Invalid callback data');
-      return;
-    }
-
-    let decision: 'APPROVED' | 'REJECTED' | 'CHANGES_REQUESTED';
-    switch (action) {
-      case 'approve':
-        decision = 'APPROVED';
-        break;
-      case 'reject':
-        decision = 'REJECTED';
-        break;
-      case 'changes':
-        decision = 'CHANGES_REQUESTED';
-        break;
-      default:
-        await this.telegram.sendMessage(chatId, '⚠️ Unknown action');
-        return;
-    }
+    let decision: "APPROVED" | "REJECTED" | "CHANGES_REQUESTED";
+    if (action === "approve") decision = "APPROVED";
+    else if (action === "reject") decision = "REJECTED";
+    else if (action === "changes") decision = "CHANGES_REQUESTED";
+    else { await this.telegram.sendMessage(chatId, "⚠️ Unknown"); return; }
 
     await this.telegram.sendTyping(chatId);
-    const response = await this.manager.handleApproval(userId, chatId, taskId, decision);
+    const response = await this.approvalHandler.handleApproval(userId, chatId, taskId, decision);
     await this.telegram.sendMessage(chatId, response);
   }
 
-  // ============================================================
-  // COMMAND HANDLERS
-  // ============================================================
+  private async handleNaturalLanguage(userId: number, chatId: number, text: string): Promise<void> {
+    await this.telegram.sendTyping(chatId);
 
-  private async handleNewProject(userId: number, chatId: number, args: string[]): Promise<void> {
-    // Expect: /newproject <name> <repo-url> <github-token>
-    if (args.length < 3) {
-      await this.telegram.sendMessage(chatId,
-        `📋 *Create New Project*\n\n` +
-        `Usage: /newproject <name> <repo-url> <github-token>\n\n` +
-        `Example:\n` +
-        `/newproject my-app https://github.com/user/repo ghp_xxxxxxxx`
-      );
+    let user = await this.d1.getUserByTelegramId(userId);
+    if (!user) {
+      const userIdStr = await this.d1.createUser(userId);
+      user = { id: userIdStr };
+    }
+
+    const activeProjectId = await this.kv.getUserActiveProject(userId);
+    if (!activeProjectId) {
+      await this.telegram.sendMessage(chatId, "🧠 Welcome! Use /newproject to start.");
       return;
     }
 
-    const [name, repoUrl, ...tokenParts] = args;
-    const githubToken = tokenParts.join(' ');
+    const project = await this.d1.getProject(activeProjectId);
+    if (!project) {
+      await this.telegram.sendMessage(chatId, "⚠️ Active project not found.");
+      return;
+    }
 
-    await this.telegram.sendTyping(chatId);
-    await this.telegram.reportProgress(chatId, 'Analyzing', 'Setting up your project...');
+    await this.telegram.reportProgress(chatId, "Analyzing", "Understanding your request...");
 
     try {
-      const projectId = await this.manager.createProject(userId, name, repoUrl, githubToken);
-      await this.telegram.sendMessage(chatId,
-        `✅ *Project Created!*\n\n` +
-        `Name: ${name}\n` +
-        `Repository: ${repoUrl}\n` +
-        `Project ID: \`${projectId}\`\n\n` +
-        `Your project is now active. Send me a task to get started!`,
-        { parseMode: 'Markdown' }
-      );
+      // Plan tasks
+      await this.telegram.reportProgress(chatId, "Planning", "Breaking down request...");
+      const context = await this.getProjectContext(project.id);
+      const tasksToCreate = await this.taskPlanner.plan(text, context);
+
+      if (tasksToCreate.length === 0) {
+        await this.telegram.sendMessage(chatId, "🧠 Couldn't break into tasks. More details?");
+        return;
+      }
+
+      // Create tasks
+      const createdTasks = [];
+      for (const input of tasksToCreate) {
+        const task = await this.d1.createTask({
+          projectId: project.id,
+          title: input.description.slice(0, 100),
+          description: input.description,
+          state: "CREATED",
+          priority: input.priority,
+          assignedAgent: null,
+          dependencies: input.dependencies,
+          requiredFiles: input.requiredFiles,
+          constraints: input.constraints,
+          expectedOutput: input.expectedOutput,
+          maxRetries: 3,
+        });
+        const taskObj = await this.d1.getTask(task);
+        if (taskObj) createdTasks.push(taskObj);
+      }
+
+      await this.telegram.sendTaskBreakdown(chatId, createdTasks.map(t => ({ id: t.id, title: t.title, priority: t.priority })));
+
+      // Execute first task
+      if (createdTasks.length > 0) {
+        await this.executionCoordinator.executeTask(project, createdTasks[0], chatId);
+      }
+
     } catch (error) {
       const err = error instanceof Error ? error.message : String(error);
-      await this.telegram.sendMessage(chatId, `❌ Failed to create project: ${err}`);
+      await this.logger.error("orchestrator", `Request failed: ${err}`, { userId, projectId: project.id });
+      await this.telegram.sendMessage(chatId, `⚠️ Error: ${err}`);
     }
   }
 
-  private async handleListProjects(userId: number, chatId: number): Promise<void> {
-    const projects = await this.manager.getUserProjects(userId);
+  // ============================================================
+  // COMMANDS
+  // ============================================================
 
+  private async cmdNewProject(userId: number, chatId: number, args: string[]): Promise<void> {
+    if (args.length < 3) {
+      await this.telegram.sendMessage(chatId, "📋 Usage: /newproject <name> <repo-url> <github-token>");
+      return;
+    }
+    const [name, repoUrl, ...tokenParts] = args;
+    const token = tokenParts.join(" ");
+
+    await this.telegram.sendTyping(chatId);
+    await this.telegram.reportProgress(chatId, "Analyzing", "Setting up project...");
+
+    try {
+      const projectId = await this.projectManager.createProject(userId, name, repoUrl, token);
+      await this.telegram.sendMessage(chatId, `✅ *Project Created!*\n\nName: ${name}\nRepo: ${repoUrl}\nID: \`${projectId}\`\n\nSend a task to start!`, { parseMode: "Markdown" });
+    } catch (error) {
+      const err = error instanceof Error ? error.message : String(error);
+      await this.telegram.sendMessage(chatId, `❌ Failed: ${err}`);
+    }
+  }
+
+  private async cmdProjects(userId: number, chatId: number): Promise<void> {
+    const projects = await this.projectManager.getUserProjects(userId);
     if (projects.length === 0) {
-      await this.telegram.sendMessage(chatId, `📭 No projects found. Use /newproject to create one.`);
+      await this.telegram.sendMessage(chatId, "📭 No projects. Use /newproject.");
       return;
     }
-
-    const lines = projects.map((p, i) =>
-      `${i + 1}. *${p.name}*\n   Status: ${p.status}\n   ${p.repoUrl}`
-    );
-
-    await this.telegram.sendMessage(chatId, `📁 *Your Projects*\n\n${lines.join('\n\n')}`, {
-      parseMode: 'Markdown',
-    });
+    const lines = projects.map((p, i) => `${i + 1}. *${p.name}*\n   ${p.status} — ${p.repoUrl}`);
+    await this.telegram.sendMessage(chatId, `📁 *Your Projects*\n\n${lines.join("\n\n")}`, { parseMode: "Markdown" });
   }
 
-  private async handleStatus(userId: number, chatId: number): Promise<void> {
-    const activeProjectId = await new (await import('../memory/kv.client')).KVClient(this.env).getUserActiveProject(userId);
-
-    if (!activeProjectId) {
-      await this.telegram.sendMessage(chatId, `⚠️ No active project. Use /projects to select one.`);
+  private async cmdStatus(userId: number, chatId: number): Promise<void> {
+    const activeId = await this.projectManager.getActiveProjectId(userId);
+    if (!activeId) {
+      await this.telegram.sendMessage(chatId, "⚠️ No active project.");
       return;
     }
-
-    const status = await this.manager.getStatus(activeProjectId);
-    await this.telegram.sendMessage(chatId, status, { parseMode: 'Markdown' });
+    const status = await this.projectManager.getStatus(activeId);
+    await this.telegram.sendMessage(chatId, status, { parseMode: "Markdown" });
   }
 
-  private async handleTasks(userId: number, chatId: number): Promise<void> {
-    const { KVClient } = await import('../memory/kv.client');
-    const activeProjectId = await new KVClient(this.env).getUserActiveProject(userId);
+  private async cmdTasks(userId: number, chatId: number): Promise<void> {
+    const activeId = await this.projectManager.getActiveProjectId(userId);
+    if (!activeId) { await this.telegram.sendMessage(chatId, "⚠️ No active project."); return; }
 
-    if (!activeProjectId) {
-      await this.telegram.sendMessage(chatId, `⚠️ No active project.`);
-      return;
-    }
+    const tasks = await this.d1.getTasksByProject(activeId);
+    if (tasks.length === 0) { await this.telegram.sendMessage(chatId, "📭 No tasks yet."); return; }
 
-    const { D1Client } = await import('../memory/d1.client');
-    const d1 = new D1Client(this.env);
-    const tasks = await d1.getTasksByProject(activeProjectId);
-
-    if (tasks.length === 0) {
-      await this.telegram.sendMessage(chatId, `📭 No tasks yet. Send a request to create one!`);
-      return;
-    }
-
-    const lines = tasks.slice(0, 10).map((t, i) =>
-      `${i + 1}. *${t.title}* — \`${t.state}\` (${t.priority})`
-    );
-
-    await this.telegram.sendMessage(chatId, `📋 *Tasks*\n\n${lines.join('\n')}`, {
-      parseMode: 'Markdown',
-    });
+    const lines = tasks.slice(0, 10).map((t, i) => `${i + 1}. *${t.title}* — \`${t.state}\` (${t.priority})`);
+    await this.telegram.sendMessage(chatId, `📋 *Tasks*\n\n${lines.join("\n")}`, { parseMode: "Markdown" });
   }
 
-  private async handleHelp(chatId: number): Promise<void> {
+  private async cmdHelp(chatId: number): Promise<void> {
     await this.telegram.sendMessage(chatId,
-      `⚔️ *Hades Army — Commands*\n\n` +
-      `/start — Welcome message\n` +
-      `/newproject <name> <repo> <token> — Create project\n` +
-      `/projects — List your projects\n` +
-      `/status — Active project status\n` +
-      `/tasks — List active tasks\n` +
-      `/help — Show this message\n\n` +
-      `*Natural Language:*\n` +
-      `Just type what you want to build!\n` +
-      `Example: "Build a login page with JWT auth"`,
-      { parseMode: 'Markdown' }
+      `⚔️ *Hades Army*\n\n/newproject <name> <repo> <token>\n/projects — List projects\n/status — Active status\n/tasks — List tasks\n/help — This message\n\n*Natural Language:*\nJust type what to build!`,
+      { parseMode: "Markdown" }
     );
   }
 
-  private async handleStart(chatId: number): Promise<void> {
+  private async cmdStart(chatId: number): Promise<void> {
     await this.telegram.sendMessage(chatId,
-      `⚔️ *Welcome to Hades Army* ⚔️\n\n` +
-      `Your AI software development team.\n\n` +
-      `I can:\n` +
-      `• Analyze your repositories\n` +
-      `• Plan and implement features\n` +
-      `• Review code automatically\n` +
-      `• Create Pull Requests\n\n` +
-      `Get started with /newproject or type what you want to build!`,
-      { parseMode: 'Markdown' }
+      `⚔️ *Welcome to Hades Army* ⚔️\n\nYour AI dev team.\n\n• Analyze repos\n• Plan & implement\n• Review & PR\n\nStart with /newproject or type a request!`,
+      { parseMode: "Markdown" }
     );
+  }
+
+  private async getProjectContext(projectId: string): Promise<string> {
+    const tasks = await this.d1.getTasksByProject(projectId);
+    const recent = tasks.slice(0, 5).map(t => `- ${t.title} (${t.state})`).join("\n");
+    return `Recent tasks:\n${recent}`;
   }
 }

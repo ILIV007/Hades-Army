@@ -1,11 +1,13 @@
 /**
- * Hades Army — LLM Service
- * Unified interface for calling AI providers (OpenRouter, Google AI Studio).
+ * Hades Army v0.2 — LLM Service
+ * Unified interface for calling AI providers with full telemetry.
+ * Pure ESM.
  */
 
-import type { HadesEnv } from '../config/env';
-import type { AgentConfig, AgentRole } from '../types';
-import { Logger } from '../utils/logger';
+import type { HadesEnv } from "../config/env";
+import type { AgentConfig, AgentRole } from "../types";
+import { Logger } from "../utils/logger";
+import { D1Client } from "../memory/d1.client";
 
 interface LLMResponse {
   content: string;
@@ -18,6 +20,7 @@ interface LLMResponse {
 
 export class LLMService {
   private logger: Logger;
+  private d1: D1Client;
 
   constructor(
     private env: HadesEnv,
@@ -25,10 +28,12 @@ export class LLMService {
     private taskId?: string
   ) {
     this.logger = new Logger(env, projectId, taskId);
+    this.d1 = new D1Client(env);
   }
 
   /**
    * Call the LLM for a given agent configuration.
+   * Records telemetry (tokens, cost, duration) to D1.
    */
   async call(
     agentConfig: AgentConfig,
@@ -36,31 +41,90 @@ export class LLMService {
     userPrompt: string
   ): Promise<LLMResponse> {
     const startTime = Date.now();
+    const runId = crypto.randomUUID();
+
+    // Record run start
+    await this.d1.createAgentRun({
+      id: runId,
+      taskId: this.taskId ?? "unknown",
+      projectId: this.projectId ?? "unknown",
+      agentRole: agentConfig.role,
+      model: agentConfig.model,
+      provider: agentConfig.provider,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      costEstimate: 0,
+      startTime: new Date().toISOString(),
+      status: "running",
+    });
 
     try {
       let response: LLMResponse;
 
-      if (agentConfig.provider === 'openrouter') {
+      if (agentConfig.provider === "openrouter") {
         response = await this.callOpenRouter(agentConfig, systemPrompt, userPrompt);
-      } else if (agentConfig.provider === 'google') {
+      } else if (agentConfig.provider === "google") {
         response = await this.callGoogle(agentConfig, systemPrompt, userPrompt);
       } else {
         throw new Error(`Unknown provider: ${agentConfig.provider}`);
       }
 
       const duration = Date.now() - startTime;
+      const cost = this.estimateCost(response.model, response.totalTokens);
 
-      await this.logger.info('agent', `LLM call completed`, {
+      // Update run with success
+      await this.d1.updateAgentRun(runId, {
+        endTime: new Date().toISOString(),
+        durationMs: duration,
+        status: "success",
+        output: response.content.slice(0, 500), // Truncate for storage
+      });
+
+      // Record model usage
+      await this.d1.recordModelUsage({
+        provider: response.provider,
+        model: response.model,
+        tokensUsed: response.totalTokens,
+        cost,
+        success: true,
+        durationMs: duration,
+        timestamp: new Date().toISOString(),
+      });
+
+      await this.logger.info("agent", `LLM call completed`, {
         model: response.model,
         provider: response.provider,
         tokens: response.totalTokens,
+        cost,
         durationMs: duration,
       });
 
       return response;
     } catch (error) {
       const duration = Date.now() - startTime;
-      await this.logger.error('agent', `LLM call failed: ${error}`, {
+      const err = error instanceof Error ? error.message : String(error);
+
+      // Update run with failure
+      await this.d1.updateAgentRun(runId, {
+        endTime: new Date().toISOString(),
+        durationMs: duration,
+        status: "failed",
+        error: err,
+      });
+
+      // Record failed usage
+      await this.d1.recordModelUsage({
+        provider: agentConfig.provider,
+        model: agentConfig.model,
+        tokensUsed: 0,
+        cost: 0,
+        success: false,
+        durationMs: duration,
+        timestamp: new Date().toISOString(),
+      });
+
+      await this.logger.error("agent", `LLM call failed: ${err}`, {
         model: agentConfig.model,
         provider: agentConfig.provider,
         durationMs: duration,
@@ -79,18 +143,18 @@ export class LLMService {
     userPrompt: string
   ): Promise<LLMResponse> {
     const res = await fetch(`${this.env.OPENROUTER_BASE_URL}/chat/completions`, {
-      method: 'POST',
+      method: "POST",
       headers: {
-        'Authorization': `Bearer ${this.env.OPENROUTER_API_KEY}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://hades-army.dev',
-        'X-Title': 'Hades Army',
+        "Authorization": `Bearer ${this.env.OPENROUTER_API_KEY}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://hades-army.dev",
+        "X-Title": "Hades Army",
       },
       body: JSON.stringify({
         model: config.model,
         messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt },
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
         ],
         temperature: config.temperature,
         max_tokens: config.maxTokens,
@@ -102,9 +166,13 @@ export class LLMService {
       throw new Error(`OpenRouter error ${res.status}: ${errText}`);
     }
 
-    const data = await res.json() as {
+    const data = (await res.json()) as {
       choices: Array<{ message: { content: string } }>;
-      usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+      usage: {
+        prompt_tokens: number;
+        completion_tokens: number;
+        total_tokens: number;
+      };
       model: string;
     };
 
@@ -114,7 +182,7 @@ export class LLMService {
       completionTokens: data.usage.completion_tokens,
       totalTokens: data.usage.total_tokens,
       model: data.model,
-      provider: 'openrouter',
+      provider: "openrouter",
     };
   }
 
@@ -128,23 +196,19 @@ export class LLMService {
     userPrompt: string
   ): Promise<LLMResponse> {
     if (!this.env.GOOGLE_AI_API_KEY) {
-      throw new Error('GOOGLE_AI_API_KEY not configured');
+      throw new Error("GOOGLE_AI_API_KEY not configured");
     }
 
     const res = await fetch(
       `${this.env.GOOGLE_AI_BASE_URL}/models/${config.model}:generateContent?key=${this.env.GOOGLE_AI_API_KEY}`,
       {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           contents: [
             {
-              role: 'user',
-              parts: [
-                { text: `${systemPrompt}
-
-${userPrompt}` },
-              ],
+              role: "user",
+              parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }],
             },
           ],
           generationConfig: {
@@ -160,9 +224,13 @@ ${userPrompt}` },
       throw new Error(`Google AI error ${res.status}: ${errText}`);
     }
 
-    const data = await res.json() as {
+    const data = (await res.json()) as {
       candidates: Array<{ content: { parts: Array<{ text: string }> } }>;
-      usageMetadata: { promptTokenCount: number; candidatesTokenCount: number; totalTokenCount: number };
+      usageMetadata: {
+        promptTokenCount: number;
+        candidatesTokenCount: number;
+        totalTokenCount: number;
+      };
     };
 
     return {
@@ -171,7 +239,23 @@ ${userPrompt}` },
       completionTokens: data.usageMetadata.candidatesTokenCount,
       totalTokens: data.usageMetadata.totalTokenCount,
       model: config.model,
-      provider: 'google',
+      provider: "google",
     };
+  }
+
+  // ============================================================
+  // COST ESTIMATION
+  // ============================================================
+
+  private estimateCost(model: string, tokens: number): number {
+    // Rough estimates per 1K tokens (input + output averaged)
+    const costs: Record<string, number> = {
+      "google/gemini-3-flash": 0.00015,
+      "qwen/qwen3-coder": 0.0003,
+      "deepseek/deepseek-v3.1": 0.0002,
+    };
+
+    const per1k = costs[model] ?? 0.0005;
+    return (tokens / 1000) * per1k;
   }
 }

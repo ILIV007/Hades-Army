@@ -10,13 +10,7 @@
     "db:migrate:local": "wrangler d1 execute hades-db --file=./src/database/schema.sql --local",
     "typecheck": "tsc --noEmit"
   },
-  "keywords": [
-    "ai",
-    "agents",
-    "github",
-    "telegram",
-    "cloudflare-workers"
-  ],
+  "keywords": ["ai", "agents", "github", "telegram", "cloudflare-workers"],
   "author": "Hades Army",
   "license": "MIT",
   "devDependencies": {

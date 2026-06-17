@@ -1,9 +1,10 @@
 /**
- * Hades Army — Encryption Utilities
+ * Hades Army v0.2 — Encryption Utilities
  * AES-GCM encryption for secrets stored in D1.
+ * Pure ESM — no require() used.
  */
 
-const ALGORITHM = 'AES-GCM';
+const ALGORITHM = "AES-GCM";
 const IV_LENGTH = 12;
 const SALT_LENGTH = 16;
 
@@ -15,24 +16,24 @@ async function deriveKey(keyString: string, salt: Uint8Array): Promise<CryptoKey
   const keyData = encoder.encode(keyString);
 
   const baseKey = await crypto.subtle.importKey(
-    'raw',
+    "raw",
     keyData,
-    { name: 'PBKDF2' },
+    { name: "PBKDF2" },
     false,
-    ['deriveKey']
+    ["deriveKey"]
   );
 
   return crypto.subtle.deriveKey(
     {
-      name: 'PBKDF2',
+      name: "PBKDF2",
       salt,
       iterations: 100000,
-      hash: 'SHA-256',
+      hash: "SHA-256",
     },
     baseKey,
     { name: ALGORITHM, length: 256 },
     false,
-    ['encrypt', 'decrypt']
+    ["encrypt", "decrypt"]
   );
 }
 
@@ -63,7 +64,7 @@ export async function encrypt(plaintext: string, masterKey: string): Promise<str
  * Decrypt a base64-encoded ciphertext string.
  */
 export async function decrypt(ciphertextB64: string, masterKey: string): Promise<string> {
-  const combined = Uint8Array.from(atob(ciphertextB64), c => c.charCodeAt(0));
+  const combined = Uint8Array.from(atob(ciphertextB64), (c) => c.charCodeAt(0));
 
   const salt = combined.slice(0, SALT_LENGTH);
   const iv = combined.slice(SALT_LENGTH, SALT_LENGTH + IV_LENGTH);

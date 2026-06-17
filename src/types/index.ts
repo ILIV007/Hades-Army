@@ -1,5 +1,5 @@
 /**
- * Hades Army — Core Type Definitions
+ * Hades Army v0.2 — Core Type Definitions
  * All types are pure data contracts — no logic.
  */
 
@@ -7,9 +7,9 @@
 // AGENT TYPES
 // ============================================================
 
-export type AgentRole = 'manager' | 'builder' | 'reviewer';
+export type AgentRole = "manager" | "builder" | "reviewer";
 
-export type AgentProvider = 'openrouter' | 'google';
+export type AgentProvider = "openrouter" | "google";
 
 export interface AgentConfig {
   role: AgentRole;
@@ -41,7 +41,7 @@ export interface AgentRun {
   startTime: string;
   endTime?: string;
   durationMs?: number;
-  status: 'running' | 'success' | 'failed' | 'timeout';
+  status: "running" | "success" | "failed" | "timeout";
   output?: string;
   error?: string;
 }
@@ -51,20 +51,20 @@ export interface AgentRun {
 // ============================================================
 
 export type TaskState =
-  | 'CREATED'
-  | 'PLANNING'
-  | 'READY'
-  | 'BUILDING'
-  | 'REVIEWING'
-  | 'PR_CREATED'
-  | 'WAITING_APPROVAL'
-  | 'MERGED'
-  | 'COMPLETED'
-  | 'FAILED'
-  | 'BLOCKED'
-  | 'CANCELLED';
+  | "CREATED"
+  | "PLANNING"
+  | "READY"
+  | "BUILDING"
+  | "REVIEWING"
+  | "PR_CREATED"
+  | "WAITING_APPROVAL"
+  | "MERGED"
+  | "COMPLETED"
+  | "FAILED"
+  | "BLOCKED"
+  | "CANCELLED";
 
-export type TaskPriority = 'critical' | 'high' | 'medium' | 'low';
+export type TaskPriority = "critical" | "high" | "medium" | "low";
 
 export interface Task {
   id: string;
@@ -91,7 +91,7 @@ export interface TaskStateTransition {
   taskId: string;
   previousState: TaskState;
   newState: TaskState;
-  triggeredBy: AgentRole | 'system' | 'user';
+  triggeredBy: AgentRole | "system" | "user";
   reason: string;
   timestamp: string;
 }
@@ -122,9 +122,9 @@ export interface BuilderOutput {
 // REVIEWER OUTPUT
 // ============================================================
 
-export type ReviewStatus = 'PASS' | 'FAIL';
+export type ReviewStatus = "PASS" | "FAIL";
 
-export type IssueSeverity = 'critical' | 'high' | 'medium' | 'low' | 'info';
+export type IssueSeverity = "critical" | "high" | "medium" | "low" | "info";
 
 export interface ReviewIssue {
   file: string;
@@ -158,7 +158,7 @@ export interface ManagerOutput {
 // PROJECT TYPES
 // ============================================================
 
-export type ProjectStatus = 'onboarding' | 'active' | 'paused' | 'archived';
+export type ProjectStatus = "onboarding" | "active" | "paused" | "archived";
 
 export interface Project {
   id: string;
@@ -184,7 +184,7 @@ export interface ProjectIndex {
 
 export interface ProjectIndexFile {
   path: string;
-  type: 'source' | 'config' | 'doc' | 'test' | 'asset';
+  type: "source" | "config" | "doc" | "test" | "asset";
   size: number;
   lastModified: string;
   module: string;
@@ -201,7 +201,7 @@ export interface ProjectIndexModule {
 export interface ProjectIndexDependency {
   from: string;
   to: string;
-  type: 'import' | 'require' | 'reference';
+  type: "import" | "require" | "reference";
 }
 
 // ============================================================
@@ -226,7 +226,7 @@ export interface GitHubPR {
   body: string;
   head: string;
   base: string;
-  state: 'open' | 'closed' | 'merged';
+  state: "open" | "closed" | "merged";
   url: string;
   htmlUrl: string;
 }
@@ -234,6 +234,18 @@ export interface GitHubPR {
 export interface GitHubFile {
   path: string;
   content: string;
+  sha: string;
+}
+
+export interface GitHubBlob {
+  sha: string;
+  url: string;
+}
+
+export interface GitHubTreeEntry {
+  path: string;
+  mode: string;
+  type: string;
   sha: string;
 }
 
@@ -305,7 +317,7 @@ export interface FileLock {
 // APPROVAL TYPES
 // ============================================================
 
-export type ApprovalStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'CHANGES_REQUESTED';
+export type ApprovalStatus = "PENDING" | "APPROVED" | "REJECTED" | "CHANGES_REQUESTED";
 
 export interface Approval {
   id: string;
@@ -337,14 +349,14 @@ export interface ModelUsage {
 // LOG TYPES
 // ============================================================
 
-export type LogType = 'task' | 'agent' | 'github' | 'memory' | 'error' | 'security' | 'workflow';
+export type LogType = "task" | "agent" | "github" | "memory" | "error" | "security" | "workflow";
 
 export interface SystemLog {
   id: string;
   projectId?: string;
   taskId?: string;
   type: LogType;
-  level: 'debug' | 'info' | 'warn' | 'error';
+  level: "debug" | "info" | "warn" | "error";
   message: string;
   metadata?: Record<string, unknown>;
   timestamp: string;
@@ -378,7 +390,7 @@ export interface TelegramUser {
 
 export interface TelegramChat {
   id: number;
-  type: 'private' | 'group' | 'supergroup' | 'channel';
+  type: "private" | "group" | "supergroup" | "channel";
 }
 
 export interface TelegramMessageEntity {
@@ -429,10 +441,30 @@ export interface WorkflowStep {
   id: string;
   workflowId: string;
   stepName: string;
-  status: 'pending' | 'running' | 'completed' | 'failed';
+  status: "pending" | "running" | "completed" | "failed";
   input?: Record<string, unknown>;
   output?: Record<string, unknown>;
   error?: string;
   startedAt?: string;
   completedAt?: string;
+}
+
+// ============================================================
+// PATCH TYPES
+// ============================================================
+
+export interface ParsedPatch {
+  oldPath: string;
+  newPath: string;
+  hunks: PatchHunk[];
+  isNewFile: boolean;
+  isDeleted: boolean;
+}
+
+export interface PatchHunk {
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  lines: string[];
 }

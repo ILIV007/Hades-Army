@@ -1,10 +1,11 @@
 /**
- * Hades Army — KV Runtime State Client
+ * Hades Army v0.2 — KV Runtime State Client
  * Fast ephemeral state. Lost on reset.
+ * Pure ESM.
  */
 
-import type { HadesEnv } from '../config/env';
-import type { TaskState } from '../types';
+import type { HadesEnv } from "../config/env";
+import type { TaskState } from "../types";
 
 export class KVClient {
   constructor(private env: HadesEnv) {}
@@ -83,7 +84,7 @@ export class KVClient {
   // ============================================================
 
   async setRepoIndex(projectId: string, indexJson: string): Promise<void> {
-    await this.kv.put(`project:${projectId}:repo_index`, indexJson, { expirationTtl: 604800 }); // 7 days
+    await this.kv.put(`project:${projectId}:repo_index`, indexJson, { expirationTtl: 604800 });
   }
 
   async getRepoIndex(projectId: string): Promise<string | null> {
