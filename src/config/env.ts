@@ -1,5 +1,5 @@
 /**
- * Hades Army v0.2 — Environment Configuration
+ * Hades Army v0.2.1 — Environment Configuration
  * All secrets come from Cloudflare Worker secrets (env bindings)
  * KV and D1 bindings are set manually in Cloudflare Dashboard
  */
@@ -62,7 +62,7 @@ export function validateEnv(env: Record<string, unknown>): HadesEnv {
     HADES_KV: env.HADES_KV as KVNamespace,
     ENCRYPTION_KEY: env.ENCRYPTION_KEY as string,
     HADES_VERSION: (env.HADES_VERSION as string) || "1.0.0",
-    DEFAULT_MANAGER_MODEL: (env.DEFAULT_MANAGER_MODEL as string) || "google/gemini-3-flash",
+    DEFAULT_MANAGER_MODEL: (env.DEFAULT_MANAGER_MODEL as string) || "gemini-3-flash",
     DEFAULT_BUILDER_MODEL: (env.DEFAULT_BUILDER_MODEL as string) || "qwen/qwen3-coder",
     DEFAULT_REVIEWER_MODEL: (env.DEFAULT_REVIEWER_MODEL as string) || "deepseek/deepseek-v3.1",
   };

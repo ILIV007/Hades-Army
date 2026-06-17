@@ -8,9 +8,6 @@ const ALGORITHM = "AES-GCM";
 const IV_LENGTH = 12;
 const SALT_LENGTH = 16;
 
-/**
- * Derive a CryptoKey from the master encryption key string.
- */
 async function deriveKey(keyString: string, salt: Uint8Array): Promise<CryptoKey> {
   const encoder = new TextEncoder();
   const keyData = encoder.encode(keyString);
@@ -37,9 +34,6 @@ async function deriveKey(keyString: string, salt: Uint8Array): Promise<CryptoKey
   );
 }
 
-/**
- * Encrypt a plaintext string. Returns base64-encoded ciphertext.
- */
 export async function encrypt(plaintext: string, masterKey: string): Promise<string> {
   const encoder = new TextEncoder();
   const salt = crypto.getRandomValues(new Uint8Array(SALT_LENGTH));
@@ -60,9 +54,6 @@ export async function encrypt(plaintext: string, masterKey: string): Promise<str
   return btoa(String.fromCharCode(...combined));
 }
 
-/**
- * Decrypt a base64-encoded ciphertext string.
- */
 export async function decrypt(ciphertextB64: string, masterKey: string): Promise<string> {
   const combined = Uint8Array.from(atob(ciphertextB64), (c) => c.charCodeAt(0));
 

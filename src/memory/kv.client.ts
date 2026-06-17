@@ -14,10 +14,6 @@ export class KVClient {
     return this.env.HADES_KV;
   }
 
-  // ============================================================
-  // USER SESSION STATE
-  // ============================================================
-
   async setUserActiveProject(telegramId: number, projectId: string): Promise<void> {
     await this.kv.put(`user:${telegramId}:active_project`, projectId, { expirationTtl: 86400 });
   }
@@ -41,10 +37,6 @@ export class KVClient {
     await this.kv.delete(`user:${telegramId}:state`);
   }
 
-  // ============================================================
-  // TASK RUNTIME STATE
-  // ============================================================
-
   async setActiveTask(projectId: string, taskId: string): Promise<void> {
     await this.kv.put(`project:${projectId}:active_task`, taskId, { expirationTtl: 86400 });
   }
@@ -62,10 +54,6 @@ export class KVClient {
     return state as TaskState | null;
   }
 
-  // ============================================================
-  // WORKFLOW CONTEXT
-  // ============================================================
-
   async setWorkflowContext(taskId: string, context: Record<string, unknown>): Promise<void> {
     await this.kv.put(`workflow:${taskId}:context`, JSON.stringify(context), { expirationTtl: 86400 });
   }
@@ -79,10 +67,6 @@ export class KVClient {
     await this.kv.delete(`workflow:${taskId}:context`);
   }
 
-  // ============================================================
-  // REPOSITORY INDEX CACHE
-  // ============================================================
-
   async setRepoIndex(projectId: string, indexJson: string): Promise<void> {
     await this.kv.put(`project:${projectId}:repo_index`, indexJson, { expirationTtl: 604800 });
   }
@@ -90,10 +74,6 @@ export class KVClient {
   async getRepoIndex(projectId: string): Promise<string | null> {
     return this.kv.get(`project:${projectId}:repo_index`);
   }
-
-  // ============================================================
-  // RATE LIMITING
-  // ============================================================
 
   async incrementRateLimit(key: string, windowSeconds: number): Promise<number> {
     const count = await this.kv.get(`ratelimit:${key}`);

@@ -39,7 +39,6 @@ export class ExecutionCoordinator {
     await this.telegram.reportProgress(chatId, "Building", `Task: ${task.title}`);
 
     try {
-      // Lock files
       if (task.requiredFiles.length > 0) {
         const { locked } = await taskService.checkFileLocks(task.requiredFiles, task.id);
         if (locked.length > 0) {
@@ -50,13 +49,11 @@ export class ExecutionCoordinator {
         await taskService.lockFiles(task.id, task.requiredFiles);
       }
 
-      // Build
       const builderConfig = this.registry.getConfig("builder");
       const builder = new BuilderAgent(this.env, builderConfig, project.id);
       const context = await this.buildContext(project, task);
       const builderOutput = await builder.execute(task, context);
 
-      // Review
       await workflow.transition(task.id, "REVIEWING", "Build complete");
       await this.telegram.reportProgress(chatId, "Reviewing", "Validating changes...");
 
@@ -81,17 +78,14 @@ export class ExecutionCoordinator {
         }
       }
 
-      // Create PR
       await workflow.transition(task.id, "PR_CREATED", "Review passed");
       await this.telegram.reportProgress(chatId, "Creating PR", "Preparing pull request...");
 
       const pr = await github.createPatchPR(task.id, task.title, builderOutput.patchDiff, task.description);
 
-      // Wait for approval
       await workflow.transition(task.id, "WAITING_APPROVAL", "PR created");
       await this.telegram.sendApprovalRequest(chatId, pr.htmlUrl, task.id);
 
-      // Update memory
       const hadesMemory = await memory.readMemory();
       if (hadesMemory) {
         hadesMemory.tasks.push({ taskId: task.id, title: task.title, state: "WAITING_APPROVAL", createdAt: task.createdAt });

@@ -1,6 +1,6 @@
 /**
- * Hades Army v0.2 — Reviewer Agent
- * Validates Builder output. PASS or FAIL. Pure ESM.
+ * Hades Army v0.2.1 — Reviewer Agent
+ * ⚔️ NO HARDCODED MODELS — reads from Registry ⚔️
  */
 
 import type { HadesEnv } from "../config/env";
@@ -10,11 +10,13 @@ import { PromptService } from "../services/prompt.service";
 import { Logger } from "../utils/logger";
 
 export class ReviewerAgent {
+  private config: AgentConfig;  // ← FIX #2: Added private config
   private llm: LLMService;
   private prompts: PromptService;
   private logger: Logger;
 
   constructor(env: HadesEnv, config: AgentConfig, projectId: string) {
+    this.config = config;  // ← FIX #2: Store config
     this.llm = new LLMService(env, projectId);
     this.prompts = new PromptService();
     this.logger = new Logger(env, projectId);
@@ -29,14 +31,23 @@ export class ReviewerAgent {
     const systemPrompt = this.prompts.getSystemPrompt("reviewer");
     const userPrompt = this.prompts.buildReviewerPrompt(builderOutput.patchDiff, task.description, architecture);
 
-    const response = await this.llm.call({ role: "reviewer", model: "deepseek/deepseek-v3.1", provider: "openrouter", temperature: 0.1, maxTokens: 8192, capabilities: [], restrictions: [] }, systemPrompt, userPrompt);
+    // FIX: Use config passed from Registry — NOT hardcoded
+    const response = await this.llm.call(
+      this.config,  // ← Registry-driven
+      systemPrompt,
+      userPrompt
+    );
 
     const status = this.parseStatus(response.content);
     const issues = this.parseIssues(response.content);
     const summary = this.parseSummary(response.content);
 
     const duration = Date.now() - startTime;
-    await this.logger.info("agent", `Reviewer completed: ${status}`, { taskId: task.id, durationMs: duration, issues: issues.length });
+    await this.logger.info("agent", `Reviewer completed: ${status}`, {
+      taskId: task.id,
+      durationMs: duration,
+      issues: issues.length,
+    });
 
     return { status, issues, summary, taskId: task.id, runId };
   }

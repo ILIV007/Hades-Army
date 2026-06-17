@@ -1,22 +1,55 @@
 /**
- * Hades Army v0.2 — Cloudflare Worker Entry Point
+ * Hades Army v0.2.1 — Cloudflare Worker Entry Point
  * Handles Telegram webhooks, health checks, webhook setup.
+ * FIX MEDIUM #1: Boot Audit runs on every worker start.
  * Pure ESM.
  */
 
 import { validateEnv, type HadesEnv } from "./config/env";
+import { createAgentRegistry, validateRegistry } from "./config/agents.config";
 import { Orchestrator } from "./core/orchestrator";
 import type { TelegramUpdate } from "./types";
+
+// FIX MEDIUM #1: Global boot audit result, computed once per worker start
+let bootAuditResult: { ok: boolean; checks: Array<{ name: string; status: string; message: string }> } | null = null;
+
+function runBootAudit(env: HadesEnv): { ok: boolean; checks: Array<{ name: string; status: string; message: string }> } {
+  const registry = createAgentRegistry(env);
+  return validateRegistry(registry);
+}
 
 export default {
   async fetch(request: Request, env: Record<string, unknown>, ctx: ExecutionContext): Promise<Response> {
     try {
       const hadesEnv = validateEnv(env);
+
+      // FIX MEDIUM #1: Run boot audit on first request if not already done
+      if (!bootAuditResult) {
+        bootAuditResult = runBootAudit(hadesEnv);
+      }
+
       const url = new URL(request.url);
 
       if (url.pathname === "/health") {
-        return new Response(JSON.stringify({ status: "ok", version: hadesEnv.HADES_VERSION, timestamp: new Date().toISOString() }), {
+        return new Response(JSON.stringify({
+          status: bootAuditResult.ok ? "ok" : "degraded",
+          version: hadesEnv.HADES_VERSION,
+          audit: bootAuditResult.checks,
+          timestamp: new Date().toISOString()
+        }), {
           headers: { "Content-Type": "application/json" },
+          status: bootAuditResult.ok ? 200 : 503,
+        });
+      }
+
+      // FIX MEDIUM #1: If boot audit failed, reject all non-health requests
+      if (!bootAuditResult.ok) {
+        return new Response(JSON.stringify({
+          error: "Boot audit failed",
+          audit: bootAuditResult.checks,
+        }), {
+          headers: { "Content-Type": "application/json" },
+          status: 503,
         });
       }
 

@@ -1,5 +1,5 @@
 /**
- * Hades Army v0.2 — GitHub Service (Unified Facade)
+ * Hades Army v0.2.1 — GitHub Service (Unified Facade)
  * Combines all GitHub clients: repo, branch, commit, PR.
  * Pure ESM.
  */
@@ -31,25 +31,18 @@ export class GitHubService {
     this.commit = new GitHubCommitClient(env, project);
   }
 
-  // ============================================================
-  // CONVENIENCE: Full Patch → PR Pipeline
-  // ============================================================
-
   async createPatchPR(
     taskId: string,
     taskTitle: string,
     patchText: string,
     description: string
   ): Promise<GitHubPR> {
-    // 1. Create branch
     const branchName = `feature/${taskId.slice(0, 8)}-${slugify(taskTitle)}`;
     await this.branch.create(branchName);
 
-    // 2. Apply patch (Blob → Tree → Commit → Ref)
     const commitMessage = `[${taskId}] ${taskTitle}`;
     await this.commit.applyPatch(branchName, patchText, commitMessage);
 
-    // 3. Create PR
     const pr = await this.pr.create(
       `TASK-${taskId.slice(0, 8)}: ${taskTitle}`,
       branchName,
@@ -61,19 +54,11 @@ export class GitHubService {
     return pr;
   }
 
-  // ============================================================
-  // CONVENIENCE: Merge with cleanup
-  // ============================================================
-
+  // FIX #3: Fixed mergeAndCleanup — use prNumber instead of undefined pr variable
   async mergeAndCleanup(prNumber: number, commitMessage?: string): Promise<void> {
     await this.pr.merge(prNumber, commitMessage);
-    // Note: Branch deletion optional — keep for audit trail
-    await this.logger.info("github", `Merged PR #${pr.number}`);
+    await this.logger.info("github", `Merged PR #${prNumber}`);  // ← FIX: use prNumber
   }
-
-  // ============================================================
-  // CONVENIENCE: Repository scan for indexing
-  // ============================================================
 
   async scanRepository(): Promise<{
     tree: Array<{ path: string; type: string; sha: string; size?: number }>;

@@ -18,10 +18,6 @@ export class GitHubRepoClient extends GitHubBaseClient {
     this.logger = new Logger(env, project.id);
   }
 
-  // ============================================================
-  // REPOSITORY TREE
-  // ============================================================
-
   async getTree(branch?: string): Promise<
     Array<{ path: string; type: string; sha: string; size?: number }>
   > {
@@ -34,10 +30,6 @@ export class GitHubRepoClient extends GitHubBaseClient {
       return data.tree;
     });
   }
-
-  // ============================================================
-  // FILE CONTENT
-  // ============================================================
 
   async getFileContent(path: string, branch?: string): Promise<string | null> {
     const ref = branch ?? this.project.defaultBranch;
@@ -58,10 +50,6 @@ export class GitHubRepoClient extends GitHubBaseClient {
       return data.content;
     });
   }
-
-  // ============================================================
-  // REPOSITORY INFO
-  // ============================================================
 
   async getRepoInfo(): Promise<{
     defaultBranch: string;
@@ -86,10 +74,6 @@ export class GitHubRepoClient extends GitHubBaseClient {
       forks: data.forks_count,
     };
   }
-
-  // ============================================================
-  // README
-  // ============================================================
 
   async getReadme(branch?: string): Promise<string | null> {
     const ref = branch ?? this.project.defaultBranch;

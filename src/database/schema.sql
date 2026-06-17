@@ -1,4 +1,4 @@
--- Hades Army v0.2 — D1 Database Schema
+-- Hades Army v0.2.1 — D1 Database Schema
 -- Run: wrangler d1 execute hades-db --file=./src/database/schema.sql
 
 CREATE TABLE IF NOT EXISTS users (

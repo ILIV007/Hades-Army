@@ -1,7 +1,6 @@
 /**
- * Hades Army v0.2 — Task Planner
- * Breaks down user requests into atomic tasks using LLM.
- * Pure ESM.
+ * Hades Army v0.2.1 — Task Planner
+ * ⚔️ NO HARDCODED MODELS — reads from Registry ⚔️
  */
 
 import type { HadesEnv } from "../../config/env";
@@ -9,16 +8,19 @@ import type { TaskInput, TaskPriority } from "../../types";
 import { LLMService } from "../../services/llm.service";
 import { PromptService } from "../../services/prompt.service";
 import { Logger } from "../../utils/logger";
+import { AgentRegistryService } from "../../agents/registry";
 
 export class TaskPlanner {
   private llm: LLMService;
   private prompts: PromptService;
   private logger: Logger;
+  private registry: AgentRegistryService;
 
   constructor(env: HadesEnv) {
     this.llm = new LLMService(env);
     this.prompts = new PromptService();
     this.logger = new Logger(env);
+    this.registry = new AgentRegistryService(env);
   }
 
   async plan(userRequest: string, projectContext: string): Promise<TaskInput[]> {
@@ -27,8 +29,11 @@ export class TaskPlanner {
     const systemPrompt = this.prompts.getSystemPrompt("manager");
     const userPrompt = this.prompts.buildManagerPlanningPrompt(userRequest, projectContext);
 
+    // FIX #4: Read manager config from Registry — NOT hardcoded
+    const managerConfig = this.registry.getConfig("manager");
+
     const response = await this.llm.call(
-      { role: "manager", model: "google/gemini-3-flash", provider: "openrouter", temperature: 0.3, maxTokens: 8192, capabilities: [], restrictions: [] },
+      managerConfig,  // ← Registry-driven
       systemPrompt,
       userPrompt
     );

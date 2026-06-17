@@ -1,7 +1,7 @@
 {
   "name": "hades-army",
   "version": "1.0.0",
-  "description": "Hades Army — Multi-Agent AI Software Development Team",
+  "description": "Hades Army v0.2.1 — Multi-Agent AI Software Development Team",
   "main": "src/worker.ts",
   "scripts": {
     "dev": "wrangler dev",

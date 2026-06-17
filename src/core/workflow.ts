@@ -1,5 +1,5 @@
 /**
- * Hades Army v0.2 — Workflow Engine v2
+ * Hades Army v0.2.1 — Workflow Engine v2
  * Central orchestrator: Task Routing, Retry, Approval, Memory Sync, GitHub Sync.
  * Pure ESM.
  */
@@ -16,17 +16,19 @@ export class WorkflowEngine {
   private kv: KVClient;
   private d1: D1Client;
   private logger: Logger;
+  private projectId: string;  // ← FIX HIGH #1: Store projectId locally
 
   constructor(env: HadesEnv, projectId: string) {
     this.taskService = new TaskService(env, projectId);
     this.kv = new KVClient(env);
     this.d1 = new D1Client(env);
     this.logger = new Logger(env, projectId);
+    this.projectId = projectId;  // ← FIX HIGH #1: Store locally
   }
 
   async initializeWorkflow(taskId: string): Promise<WorkflowContext> {
     const context: WorkflowContext = {
-      projectId: this.taskService["projectId"],
+      projectId: this.projectId,  // ← FIX HIGH #1: Use local projectId
       taskId,
       currentState: "CREATED",
       retryCount: 0,
@@ -60,7 +62,12 @@ export class WorkflowEngine {
     await this.logger.info("workflow", `${prev} -> ${newState}`, { taskId, reason, retry: updated.retryCount });
   }
 
-  async executeWithRetry(taskId: string, operation: () => Promise<void>): Promise<void> {
+  // FIX HIGH #2: Retry goes back to previous state, not always BUILDING
+  async executeWithRetry(
+    taskId: string,
+    previousState: TaskState,  // ← FIX HIGH #2: Accept previous state
+    operation: () => Promise<void>
+  ): Promise<void> {
     try {
       await operation();
     } catch (error) {
@@ -70,7 +77,8 @@ export class WorkflowEngine {
       const canRetry = await this.taskService.canRetry(taskId);
       if (canRetry) {
         await this.taskService.incrementRetry(taskId);
-        await this.transition(taskId, "BUILDING", `Retry after error: ${err}`);
+        // FIX HIGH #2: Go back to previous state, not hardcoded BUILDING
+        await this.transition(taskId, previousState, `Retry after error: ${err}`);
         throw new Error(`RETRY_NEEDED: ${err}`);
       } else {
         await this.transition(taskId, "FAILED", `Max retries exceeded: ${err}`);

@@ -117,7 +117,6 @@ export class Orchestrator {
     await this.telegram.reportProgress(chatId, "Analyzing", "Understanding your request...");
 
     try {
-      // Plan tasks
       await this.telegram.reportProgress(chatId, "Planning", "Breaking down request...");
       const context = await this.getProjectContext(project.id);
       const tasksToCreate = await this.taskPlanner.plan(text, context);
@@ -127,7 +126,6 @@ export class Orchestrator {
         return;
       }
 
-      // Create tasks
       const createdTasks = [];
       for (const input of tasksToCreate) {
         const task = await this.d1.createTask({
@@ -149,7 +147,6 @@ export class Orchestrator {
 
       await this.telegram.sendTaskBreakdown(chatId, createdTasks.map(t => ({ id: t.id, title: t.title, priority: t.priority })));
 
-      // Execute first task
       if (createdTasks.length > 0) {
         await this.executionCoordinator.executeTask(project, createdTasks[0], chatId);
       }
@@ -161,13 +158,9 @@ export class Orchestrator {
     }
   }
 
-  // ============================================================
-  // COMMANDS
-  // ============================================================
-
   private async cmdNewProject(userId: number, chatId: number, args: string[]): Promise<void> {
     if (args.length < 3) {
-      await this.telegram.sendMessage(chatId, "📋 Usage: /newproject <name> <repo-url> <github-token>");
+      await this.telegram.sendMessage(chatId, "📋 Usage: /newproject <name> <repo_url> <github_token>");
       return;
     }
     const [name, repoUrl, ...tokenParts] = args;

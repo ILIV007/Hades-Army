@@ -21,10 +21,6 @@ export class TaskService {
     this.logger = new Logger(env, projectId);
   }
 
-  // ============================================================
-  // CREATE
-  // ============================================================
-
   async createTask(input: TaskInput): Promise<Task> {
     const id = await this.d1.createTask({
       projectId: this.projectId,
@@ -48,10 +44,6 @@ export class TaskService {
     return task;
   }
 
-  // ============================================================
-  // READ
-  // ============================================================
-
   async getTask(id: string): Promise<Task | null> {
     return this.d1.getTask(id);
   }
@@ -63,10 +55,6 @@ export class TaskService {
   async getActiveTasks(): Promise<Task[]> {
     return this.d1.getActiveTasksByProject(this.projectId);
   }
-
-  // ============================================================
-  // STATE MANAGEMENT (with validation)
-  // ============================================================
 
   async transitionState(taskId: string, newState: TaskState, reason: string): Promise<void> {
     const task = await this.d1.getTask(taskId);
@@ -100,19 +88,11 @@ export class TaskService {
     return transitions[from]?.includes(to) ?? false;
   }
 
-  // ============================================================
-  // ASSIGNMENT
-  // ============================================================
-
   async assignAgent(taskId: string, agent: "manager" | "builder" | "reviewer"): Promise<void> {
     await this.d1.db.prepare(`UPDATE tasks SET assigned_agent = ? WHERE id = ?`).bind(agent, taskId).run();
     await this.kv.setActiveTask(this.projectId, taskId);
     await this.logger.info("task", `Assigned ${agent} to ${taskId}`);
   }
-
-  // ============================================================
-  // RETRY
-  // ============================================================
 
   async canRetry(taskId: string): Promise<boolean> {
     const task = await this.d1.getTask(taskId);
@@ -125,21 +105,15 @@ export class TaskService {
     await this.logger.info("task", `Retry incremented for ${taskId}`);
   }
 
-  // ============================================================
-  // FILE LOCKING
-  // ============================================================
-
   async lockFiles(taskId: string, filePaths: string[]): Promise<void> {
     const now = new Date();
-    const expiresAt = new Date(now.getTime() + 30 * 60 * 1000); // 30 min lock
+    const expiresAt = new Date(now.getTime() + 30 * 60 * 1000);
 
     for (const filePath of filePaths) {
-      // Check existing lock
       const existing = await this.d1.getFileLock(filePath);
       if (existing && existing.taskId !== taskId) {
         throw new Error(`File locked by another task: ${filePath} (task ${existing.taskId})`);
       }
-
       await this.d1.createFileLock(filePath, taskId, expiresAt.toISOString());
     }
 

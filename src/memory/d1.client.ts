@@ -16,10 +16,6 @@ export class D1Client {
     return this.env.HADES_D1;
   }
 
-  // ============================================================
-  // USERS
-  // ============================================================
-
   async createUser(telegramId: number, settingsJson: string = "{}"): Promise<string> {
     const id = crypto.randomUUID();
     await this.db
@@ -39,10 +35,6 @@ export class D1Client {
       .first<{ id: string }>();
     return result ?? null;
   }
-
-  // ============================================================
-  // PROJECTS
-  // ============================================================
 
   async createProject(
     project: Omit<Project, "id" | "createdAt" | "updatedAt">
@@ -112,12 +104,8 @@ export class D1Client {
     };
   }
 
-  // ============================================================
-  // TASKS
-  // ============================================================
-
   async createTask(
-    task: Omit<Task, "id" | "createdAt" | "updatedAt" | "retryCount">
+    task: Omit<Task, "id" | "createdAt" | "updatedAt" | "completedAt" | "retryCount">
   ): Promise<string> {
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
@@ -233,10 +221,6 @@ export class D1Client {
     };
   }
 
-  // ============================================================
-  // AGENT RUNS
-  // ============================================================
-
   async createAgentRun(run: Omit<AgentRun, "id">): Promise<string> {
     const id = crypto.randomUUID();
     await this.db
@@ -305,19 +289,15 @@ export class D1Client {
       .run();
   }
 
-  // ============================================================
-  // FILE LOCKS
-  // ============================================================
-
   async createFileLock(filePath: string, taskId: string, expiresAt: string): Promise<void> {
     await this.db
       .prepare(
         `INSERT INTO file_locks (file_path, task_id, locked_at, expires_at)
          VALUES (?, ?, ?, ?)
          ON CONFLICT(file_path) DO UPDATE SET
-           task_id = excluded.task_id,
-           locked_at = excluded.locked_at,
-           expires_at = excluded.expires_at`
+         task_id = excluded.task_id,
+         locked_at = excluded.locked_at,
+         expires_at = excluded.expires_at`
       )
       .bind(filePath, taskId, new Date().toISOString(), expiresAt)
       .run();
@@ -365,10 +345,6 @@ export class D1Client {
       .run();
     return result.meta.changes ?? 0;
   }
-
-  // ============================================================
-  // APPROVALS
-  // ============================================================
 
   async createApproval(approval: Omit<Approval, "id">): Promise<string> {
     const id = crypto.randomUUID();
@@ -430,10 +406,6 @@ export class D1Client {
       : null;
   }
 
-  // ============================================================
-  // MODEL USAGE
-  // ============================================================
-
   async recordModelUsage(usage: Omit<ModelUsage, "id">): Promise<void> {
     await this.db
       .prepare(
@@ -452,10 +424,6 @@ export class D1Client {
       )
       .run();
   }
-
-  // ============================================================
-  // CLEANUP
-  // ============================================================
 
   async cleanExpiredLocks(): Promise<number> {
     const result = await this.db

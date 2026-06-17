@@ -1,6 +1,7 @@
 /**
- * Hades Army v0.2 — GitHub Base Client
+ * Hades Army v0.2.1 — GitHub Base Client
  * Shared authentication and request logic for all GitHub clients.
+ * FIX HIGH #4: Token cached after first decrypt to avoid repeated crypto operations.
  * Pure ESM.
  */
 
@@ -9,6 +10,8 @@ import type { Project } from "../../types";
 import { decrypt } from "../../utils/crypto";
 
 export class GitHubBaseClient {
+  private cachedToken: string | null = null;  // ← FIX HIGH #4: Token cache
+
   constructor(
     protected env: HadesEnv,
     protected project: Project
@@ -23,7 +26,12 @@ export class GitHubBaseClient {
   }
 
   protected async getToken(): Promise<string> {
-    return decrypt(this.project.githubTokenEncrypted, this.env.ENCRYPTION_KEY);
+    // FIX HIGH #4: Return cached token if available
+    if (this.cachedToken) {
+      return this.cachedToken;
+    }
+    this.cachedToken = await decrypt(this.project.githubTokenEncrypted, this.env.ENCRYPTION_KEY);
+    return this.cachedToken;
   }
 
   protected async headers(): Promise<Record<string, string>> {
@@ -41,9 +49,6 @@ export class GitHubBaseClient {
     return { ...base, "Content-Type": "application/json" };
   }
 
-  /**
-   * Generic GET request with error handling.
-   */
   protected async get<T>(path: string): Promise<T> {
     const headers = await this.headers();
     const res = await fetch(`${this.apiBase}${path}`, { headers });
@@ -51,9 +56,6 @@ export class GitHubBaseClient {
     return res.json() as Promise<T>;
   }
 
-  /**
-   * Generic POST request with error handling.
-   */
   protected async post<T>(path: string, body: unknown): Promise<T> {
     const headers = await this.headersWithContentType();
     const res = await fetch(`${this.apiBase}${path}`, {
@@ -65,9 +67,6 @@ export class GitHubBaseClient {
     return res.json() as Promise<T>;
   }
 
-  /**
-   * Generic PUT request with error handling.
-   */
   protected async put<T>(path: string, body: unknown): Promise<T> {
     const headers = await this.headersWithContentType();
     const res = await fetch(`${this.apiBase}${path}`, {
@@ -79,9 +78,6 @@ export class GitHubBaseClient {
     return res.json() as Promise<T>;
   }
 
-  /**
-   * Generic DELETE request with error handling.
-   */
   protected async delete(path: string): Promise<void> {
     const headers = await this.headers();
     const res = await fetch(`${this.apiBase}${path}`, {

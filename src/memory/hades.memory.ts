@@ -41,10 +41,6 @@ export class HadesMemoryManager {
     return `${this.project.repoOwner}/${this.project.repoName}`;
   }
 
-  // ============================================================
-  // READ MEMORY
-  // ============================================================
-
   async readMemory(): Promise<HadesMemory | null> {
     try {
       const [stateRaw, tasksRaw, reviewsRaw, decisionsRaw, contextRaw, indexRaw] = await Promise.all([
@@ -78,10 +74,6 @@ export class HadesMemoryManager {
       return null;
     }
   }
-
-  // ============================================================
-  // WRITE MEMORY (sync to .hades/)
-  // ============================================================
 
   async writeMemory(memory: Partial<HadesMemory>): Promise<void> {
     const headers = await this.headers();
@@ -137,15 +129,10 @@ export class HadesMemoryManager {
     await this.logger.info("memory", `Synced ${files.length} files to .hades/`);
   }
 
-  // ============================================================
-  // SYNC: D1 → .hades (rebuild memory from D1)
-  // ============================================================
-
   async syncFromD1(d1Tasks: TaskMemory[], d1Reviews: ReviewMemory[]): Promise<void> {
     const memory = await this.readMemory();
     if (!memory) return;
 
-    // Merge D1 data into memory
     memory.tasks = d1Tasks;
     memory.reviews = d1Reviews;
     memory.projectState.lastUpdated = new Date().toISOString();
@@ -159,15 +146,10 @@ export class HadesMemoryManager {
     await this.logger.info("memory", "Synced D1 data to .hades/");
   }
 
-  // ============================================================
-  // INITIALIZE .hades DIRECTORY
-  // ============================================================
-
   async initializeHadesDirectory(): Promise<void> {
     const headers = await this.headers();
     const branch = this.project.defaultBranch;
 
-    // Check if .hades already exists
     try {
       const check = await fetch(
         `${this.apiBase}/repos/${this.repoPath}/contents/.hades?ref=${branch}`,
@@ -249,10 +231,6 @@ export class HadesMemoryManager {
     await this.logger.info("memory", "Initialized .hades directory");
   }
 
-  // ============================================================
-  // HELPERS
-  // ============================================================
-
   private async fetchFileContent(path: string): Promise<string | null> {
     const headers = await this.headers();
     const url = `${this.apiBase}/repos/${this.repoPath}/contents/${path}?ref=${this.project.defaultBranch}`;
@@ -274,7 +252,6 @@ export class HadesMemoryManager {
     branch: string,
     headers: Record<string, string>
   ): Promise<void> {
-    // Get current SHA if file exists
     let sha: string | undefined;
     try {
       const checkRes = await fetch(
@@ -289,7 +266,7 @@ export class HadesMemoryManager {
       // File doesn't exist
     }
 
-    const body: Record<string, string> = {
+    const body: Record<string, unknown> = {
       message: `[hades] Update ${path}`,
       content: btoa(content),
       branch,

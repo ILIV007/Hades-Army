@@ -31,10 +31,8 @@ export class Logger {
       timestamp: new Date().toISOString(),
     };
 
-    // Console output (structured JSON)
     console.log(JSON.stringify(log));
 
-    // Persist to D1 (best effort — do not throw)
     try {
       await this.env.HADES_D1.prepare(
         `INSERT INTO logs (id, project_id, task_id, type, level, message, metadata, timestamp)

@@ -1,5 +1,5 @@
 /**
- * Hades Army v0.2 — LLM Service
+ * Hades Army v0.2.1 — LLM Service
  * Unified interface for calling AI providers with full telemetry.
  * Pure ESM.
  */
@@ -78,7 +78,7 @@ export class LLMService {
         endTime: new Date().toISOString(),
         durationMs: duration,
         status: "success",
-        output: response.content.slice(0, 500), // Truncate for storage
+        output: response.content.slice(0, 500),
       });
 
       // Record model usage
@@ -168,11 +168,7 @@ export class LLMService {
 
     const data = (await res.json()) as {
       choices: Array<{ message: { content: string } }>;
-      usage: {
-        prompt_tokens: number;
-        completion_tokens: number;
-        total_tokens: number;
-      };
+      usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
       model: string;
     };
 
@@ -199,8 +195,13 @@ export class LLMService {
       throw new Error("GOOGLE_AI_API_KEY not configured");
     }
 
+    // FIX: Handle model name correctly for Google AI Studio
+    const modelName = config.model.startsWith("gemini")
+      ? config.model
+      : `models/${config.model}`;
+
     const res = await fetch(
-      `${this.env.GOOGLE_AI_BASE_URL}/models/${config.model}:generateContent?key=${this.env.GOOGLE_AI_API_KEY}`,
+      `${this.env.GOOGLE_AI_BASE_URL}/models/${modelName}:generateContent?key=${this.env.GOOGLE_AI_API_KEY}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -248,9 +249,9 @@ export class LLMService {
   // ============================================================
 
   private estimateCost(model: string, tokens: number): number {
-    // Rough estimates per 1K tokens (input + output averaged)
     const costs: Record<string, number> = {
       "google/gemini-3-flash": 0.00015,
+      "gemini-3-flash": 0.00015,
       "qwen/qwen3-coder": 0.0003,
       "deepseek/deepseek-v3.1": 0.0002,
     };

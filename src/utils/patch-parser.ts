@@ -6,9 +6,6 @@
 
 import type { ParsedPatch, PatchHunk } from "../types";
 
-/**
- * Parse a unified diff string into structured patch objects.
- */
 export function parsePatch(patchText: string): ParsedPatch[] {
   const patches: ParsedPatch[] = [];
   const lines = patchText.split("\n");
@@ -19,9 +16,7 @@ export function parsePatch(patchText: string): ParsedPatch[] {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
 
-    // New file diff
     if (line.startsWith("diff --git")) {
-      // Save previous hunk/patch
       if (currentHunk && currentPatch) {
         currentPatch.hunks.push(currentHunk);
         currentHunk = null;
@@ -45,7 +40,6 @@ export function parsePatch(patchText: string): ParsedPatch[] {
 
     if (!currentPatch) continue;
 
-    // Detect new/deleted files
     if (line.startsWith("new file mode")) {
       currentPatch.isNewFile = true;
       continue;
@@ -55,7 +49,6 @@ export function parsePatch(patchText: string): ParsedPatch[] {
       continue;
     }
 
-    // Hunk header
     const hunkMatch = line.match(/^@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@/);
     if (hunkMatch) {
       if (currentHunk) {
@@ -71,13 +64,11 @@ export function parsePatch(patchText: string): ParsedPatch[] {
       continue;
     }
 
-    // Hunk content lines
     if (currentHunk) {
       currentHunk.lines.push(line);
     }
   }
 
-  // Finalize last hunk/patch
   if (currentHunk && currentPatch) {
     currentPatch.hunks.push(currentHunk);
   }
@@ -88,13 +79,8 @@ export function parsePatch(patchText: string): ParsedPatch[] {
   return patches;
 }
 
-/**
- * Apply a parsed patch to original file content.
- * Returns the new file content.
- */
 export function applyPatchToContent(original: string, patch: ParsedPatch): string {
   if (patch.isNewFile) {
-    // For new files, collect all added lines
     const lines: string[] = [];
     for (const hunk of patch.hunks) {
       for (const line of hunk.lines) {
@@ -110,7 +96,6 @@ export function applyPatchToContent(original: string, patch: ParsedPatch): strin
     return "";
   }
 
-  // For modified files, apply hunks
   const originalLines = original.split("\n");
   const result = [...originalLines];
   let offset = 0;
@@ -122,16 +107,13 @@ export function applyPatchToContent(original: string, patch: ParsedPatch): strin
 
     for (const line of hunk.lines) {
       if (line.startsWith(" ")) {
-        // Context line — keep
         resultIndex++;
         originalIndex++;
       } else if (line.startsWith("-")) {
-        // Removed line — delete from result
         result.splice(resultIndex, 1);
         originalIndex++;
         offset--;
       } else if (line.startsWith("+") && !line.startsWith("+++")) {
-        // Added line — insert
         result.splice(resultIndex, 0, line.slice(1));
         resultIndex++;
         offset++;
@@ -142,9 +124,6 @@ export function applyPatchToContent(original: string, patch: ParsedPatch): strin
   return result.join("\n");
 }
 
-/**
- * Extract all affected file paths from a raw patch string.
- */
 export function extractPatchFiles(patchText: string): string[] {
   const patches = parsePatch(patchText);
   return patches.map((p) => p.newPath);

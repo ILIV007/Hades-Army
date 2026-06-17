@@ -18,10 +18,6 @@ export class GitHubPRClient extends GitHubBaseClient {
     this.logger = new Logger(env, project.id);
   }
 
-  // ============================================================
-  // CREATE PR
-  // ============================================================
-
   async create(
     title: string,
     head: string,
@@ -55,10 +51,6 @@ export class GitHubPRClient extends GitHubBaseClient {
     });
   }
 
-  // ============================================================
-  // GET PR
-  // ============================================================
-
   async get(number: number): Promise<GitHubPR> {
     const data = await this.get<{
       number: number;
@@ -83,10 +75,6 @@ export class GitHubPRClient extends GitHubBaseClient {
     };
   }
 
-  // ============================================================
-  // MERGE PR
-  // ============================================================
-
   async merge(number: number, commitMessage?: string): Promise<void> {
     await this.put(`/repos/${this.repoPath}/pulls/${number}/merge`, {
       commit_title: commitMessage ?? `Merge PR #${number}`,
@@ -94,10 +82,6 @@ export class GitHubPRClient extends GitHubBaseClient {
     });
     await this.logger.info("github", `Merged PR #${number}`);
   }
-
-  // ============================================================
-  // LIST PRs
-  // ============================================================
 
   async list(state: "open" | "closed" | "all" = "open"): Promise<GitHubPR[]> {
     const data = await this.get<
