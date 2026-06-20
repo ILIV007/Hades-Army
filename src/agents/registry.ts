@@ -1,85 +1,127 @@
 /**
- * Hades Army v0.2.1 — Agent Registry Service
- * Dynamic agent configuration with validation and persistence.
- * Pure ESM.
+ * Hades Army v0.6 - Agent Registry
+ * Manages agent registration, capabilities, and routing
  */
 
-import type { AgentRole, AgentConfig, AgentRegistry } from "../types";
-import type { HadesEnv } from "../config/env";
-import { KVClient } from "../memory/kv.client";
-import { createAgentRegistry, getAgentConfig, validateRegistry } from "../config/agents.config";
+import type { Agent, AgentType, Task } from '../core/types';
 
-const KV_REGISTRY_KEY = "agent_registry:overrides";
+interface AgentRegistry {
+  agents: Map<string, Agent>;
+  capabilities: Map<string, string[]>;
+}
 
-export class AgentRegistryService {
-  private registry: AgentRegistry;
-  private kv: KVClient;
+const registry: AgentRegistry = {
+  agents: new Map(),
+  capabilities: new Map([
+    ['manager', ['planning', 'analysis', 'architecture', 'risk_assessment', 'task_creation']],
+    ['builder', ['coding', 'testing', 'refactoring', 'documentation']],
+    ['reviewer', ['code_review', 'security_audit', 'performance_review', 'architecture_compliance']],
+  ]),
+};
 
-  constructor(env: HadesEnv) {
-    this.kv = new KVClient(env);
-    this.registry = createAgentRegistry(env);
+export function registerAgent(agent: Agent): void {
+  registry.agents.set(agent.id, agent);
+}
 
-    // Boot-time validation
-    const audit = validateRegistry(this.registry);
-    if (!audit.ok) {
-      const failures = audit.checks.filter(c => c.status === "fail");
-      throw new Error(
-        `Registry validation failed:\n${failures.map(f => `  - ${f.name}: ${f.message}`).join("\n")}`
-      );
-    }
-  }
+export function getAgent(id: string): Agent | undefined {
+  return registry.agents.get(id);
+}
 
-  async init(): Promise<void> {
-    // FIX MEDIUM #3: Load persisted overrides from KV on init
-    const overridesJson = await this.kv.kv.get(KV_REGISTRY_KEY);
-    if (overridesJson) {
-      try {
-        const overrides = JSON.parse(overridesJson) as Partial<AgentRegistry>;
-        for (const [role, config] of Object.entries(overrides)) {
-          if (config && this.isValidRole(role)) {
-            this.registry = {
-              ...this.registry,
-              [role]: { ...this.registry[role as AgentRole], ...config },
-            };
-          }
-        }
-      } catch {
-        // Invalid overrides, ignore
-      }
-    }
-  }
+export function getAgentsByType(type: AgentType): Agent[] {
+  return Array.from(registry.agents.values()).filter(a => a.type === type);
+}
 
-  getConfig(role: AgentRole): AgentConfig {
-    return getAgentConfig(this.registry, role);
-  }
+export function getAvailableAgent(type: AgentType): Agent | null {
+  const agents = getAgentsByType(type);
+  const available = agents.find(a => a.status === 'idle');
+  return available || null;
+}
 
-  getRegistry(): AgentRegistry {
-    return { ...this.registry };
-  }
-
-  // FIX MEDIUM #3: Persist model changes to KV
-  async updateModel(role: AgentRole, model: string, provider: "openrouter" | "google" = "openrouter"): Promise<void> {
-    this.registry = { ...this.registry, [role]: { ...this.registry[role], model, provider } };
-
-    // Persist to KV
-    const overrides: Partial<AgentRegistry> = {};
-    for (const [r, cfg] of Object.entries(this.registry)) {
-      if (this.isValidRole(r)) {
-        overrides[r as AgentRole] = cfg;
-      }
-    }
-    await this.kv.kv.put(KV_REGISTRY_KEY, JSON.stringify(overrides), { expirationTtl: 2592000 }); // 30 days
-  }
-
-  hasCapability(role: AgentRole, capability: string): boolean {
-    return this.getConfig(role).capabilities.includes(capability);
-  }
-
-  isRestricted(role: AgentRole, action: string): boolean {
-    return this.getConfig(role).restrictions.includes(action);
-  }
-
-  private isValidRole(role: string): role is AgentRole {
-    return ["manager", "builder", "reviewer"].includes(role);
+export function assignTask(agentId: string, taskId: number): void {
+  const agent = registry.agents.get(agentId);
+  if (agent) {
+    agent.status = 'working';
+    agent.currentTaskId = taskId;
+    agent.lastActiveAt = new Date().toISOString();
   }
 }
+
+export function completeTask(agentId: string): void {
+  const agent = registry.agents.get(agentId);
+  if (agent) {
+    agent.status = 'idle';
+    agent.currentTaskId = undefined;
+    agent.efficiency = calculateEfficiency(agent);
+  }
+}
+
+export function getAgentCapabilities(type: AgentType): string[] {
+  return registry.capabilities.get(type) || [];
+}
+
+export function canHandleTask(agent: Agent, task: Task): boolean {
+  const capabilities = getAgentCapabilities(agent.type);
+
+  switch (task.priority) {
+    case 'critical':
+      return capabilities.includes('planning') || capabilities.includes('code_review');
+    case 'high':
+      return agent.efficiency > 70;
+    default:
+      return true;
+  }
+}
+
+function calculateEfficiency(agent: Agent): number {
+  // Simplified efficiency calculation
+  const baseEfficiency = 85;
+  const taskBonus = agent.currentTaskId ? 5 : 0;
+  return Math.min(baseEfficiency + taskBonus, 100);
+}
+
+export function getSystemStatus(): {
+  totalAgents: number;
+  activeAgents: number;
+  idleAgents: number;
+  agentTypes: Record<string, number>;
+} {
+  const agents = Array.from(registry.agents.values());
+  return {
+    totalAgents: agents.length,
+    activeAgents: agents.filter(a => a.status === 'working').length,
+    idleAgents: agents.filter(a => a.status === 'idle').length,
+    agentTypes: {
+      manager: agents.filter(a => a.type === 'manager').length,
+      builder: agents.filter(a => a.type === 'builder').length,
+      reviewer: agents.filter(a => a.type === 'reviewer').length,
+    },
+  };
+}
+
+// Initialize default agents
+registerAgent({
+  id: 'manager-1',
+  type: 'manager',
+  name: 'Technical Architect',
+  status: 'idle',
+  capabilities: ['planning', 'analysis', 'architecture', 'risk_assessment', 'task_creation'],
+  efficiency: 95,
+});
+
+registerAgent({
+  id: 'builder-1',
+  type: 'builder',
+  name: 'Senior Builder',
+  status: 'idle',
+  capabilities: ['coding', 'testing', 'refactoring', 'documentation'],
+  efficiency: 90,
+});
+
+registerAgent({
+  id: 'reviewer-1',
+  type: 'reviewer',
+  name: 'Code Reviewer',
+  status: 'idle',
+  capabilities: ['code_review', 'security_audit', 'performance_review', 'architecture_compliance'],
+  efficiency: 92,
+});

@@ -1,36 +1,54 @@
-name = "hades-army"
-main = "src/worker.ts"
-compatibility_date = "2026-06-16"
+name = "hades-army-v0.6"
+main = "src/core/worker.ts"
+compatibility_date = "2024-06-20"
 compatibility_flags = ["nodejs_compat"]
 
-# D1 Database — set manually in Cloudflare Dashboard
+# D1 Database
 [[d1_databases]]
-binding = "HADES_D1"
-database_name = "hades-db"
-database_id = "YOUR_D1_DATABASE_ID"
+binding = "DB"
+database_name = "hades-army-db"
+database_id = "your-database-id-here"
 
-# KV Namespace — set manually in Cloudflare Dashboard
+# KV Namespaces
 [[kv_namespaces]]
-binding = "HADES_KV"
-id = "YOUR_KV_NAMESPACE_ID"
+binding = "KV_CACHE"
+id = "your-kv-cache-id"
 
+[[kv_namespaces]]
+binding = "KV_SESSIONS"
+id = "your-kv-sessions-id"
+
+[[kv_namespaces]]
+binding = "KV_PROJECTS"
+id = "your-kv-projects-id"
+
+# Environment Variables
 [vars]
-HADES_VERSION = "0.2.1"
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-GITHUB_API_BASE_URL = "https://api.github.com"
+ENVIRONMENT = "production"
+GITHUB_WEBHOOK_SECRET = ""
+TELEGRAM_BOT_TOKEN = ""
+OPENROUTER_API_KEY = ""
+GOOGLE_AI_API_KEY = ""
 
-# Manager → Google AI Studio (no "google/" prefix for direct Google API)
-DEFAULT_MANAGER_MODEL = "gemini-3-flash"
-
-# Builder → OpenRouter
-DEFAULT_BUILDER_MODEL = "qwen/qwen3-coder"
-
-# Reviewer → OpenRouter
-DEFAULT_REVIEWER_MODEL = "deepseek/deepseek-v3.1"
-
-# Secrets (set via: wrangler secret put <NAME>)
-# TELEGRAM_BOT_TOKEN
-# OPENROUTER_API_KEY
+# Secrets (use wrangler secret put)
 # GITHUB_TOKEN
+# OPENROUTER_API_KEY
+# GOOGLE_AI_API_KEY
+# TELEGRAM_BOT_TOKEN
+# JWT_SECRET
 # ENCRYPTION_KEY
-# GOOGLE_AI_API_KEY (required for Manager)
+
+# R2 Bucket for file storage
+[[r2_buckets]]
+binding = "FILE_STORAGE"
+bucket_name = "hades-army-files"
+
+# Queue for background jobs
+[[queues.producers]]
+binding = "JOB_QUEUE"
+queue = "hades-army-jobs"
+
+[[queues.consumers]]
+queue = "hades-army-jobs"
+max_batch_size = 10
+max_batch_timeout = 30

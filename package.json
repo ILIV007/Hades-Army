@@ -1,21 +1,45 @@
 {
-  "name": "hades-army",
-  "version": "1.0.0",
-  "description": "Hades Army v0.2.1 — Multi-Agent AI Software Development Team",
-  "main": "src/worker.ts",
+  "name": "hades-army-v0.6",
+  "version": "0.6.0",
+  "description": "Hades Army - AI Software Engineering Team. Agent Orchestrator with Repository Intelligence, Architecture Memory, Knowledge Graph, and Failure Learning.",
+  "main": "src/core/worker.ts",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "db:migrate": "wrangler d1 execute hades-db --file=./src/database/schema.sql",
-    "db:migrate:local": "wrangler d1 execute hades-db --file=./src/database/schema.sql --local",
+    "db:migrate": "wrangler d1 migrations apply hades-army-db",
+    "db:create": "wrangler d1 create hades-army-db",
+    "test": "vitest",
+    "lint": "eslint src/",
     "typecheck": "tsc --noEmit"
   },
-  "keywords": ["ai", "agents", "github", "telegram", "cloudflare-workers"],
-  "author": "Hades Army",
-  "license": "MIT",
+  "dependencies": {
+    "@octokit/rest": "^20.0.2",
+    "telegraf": "^4.16.3",
+    "jose": "^5.2.0",
+    "zod": "^3.22.4"
+  },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240614.0",
-    "typescript": "^5.5.0",
-    "wrangler": "^3.60.0"
-  }
+    "typescript": "^5.4.5",
+    "wrangler": "^3.60.0",
+    "vitest": "^1.6.0",
+    "eslint": "^8.57.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "orchestrator",
+    "software-engineering",
+    "repository-intelligence",
+    "architecture-memory",
+    "knowledge-graph",
+    "cloudflare-workers"
+  ],
+  "author": "Hades Army Team",
+  "license": "MIT"
 }
