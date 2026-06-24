@@ -1,0 +1,119 @@
+{
+  "$schema": "https://hades-army.workers.dev/schemas/model-registry-v0.8.5.json",
+  "version": "0.8.5",
+  "updatedAt": "2026-06-22T00:00:00.000Z",
+  "providers": [
+    "google",
+    "openrouter",
+    "cloudflare",
+    "anthropic",
+    "openai",
+    "grok"
+  ],
+  "models": {
+    "google/gemini-3-flash": {
+      "provider": "google",
+      "model": "gemini-3-flash",
+      "costPer1MInputTokens": 0,
+      "costPer1MOutputTokens": 0,
+      "contextWindow": 1000000,
+      "rateLimitPerMin": 15
+    },
+    "google/gemini-2.5-pro": {
+      "provider": "google",
+      "model": "gemini-2.5-pro",
+      "costPer1MInputTokens": 1.25,
+      "costPer1MOutputTokens": 10,
+      "contextWindow": 2000000,
+      "rateLimitPerMin": 5
+    },
+    "openrouter/qwen/qwen3-coder": {
+      "provider": "openrouter",
+      "model": "qwen/qwen3-coder",
+      "costPer1MInputTokens": 0.18,
+      "costPer1MOutputTokens": 0.18,
+      "contextWindow": 128000,
+      "rateLimitPerMin": 20
+    },
+    "openrouter/deepseek/deepseek-chat": {
+      "provider": "openrouter",
+      "model": "deepseek/deepseek-chat",
+      "costPer1MInputTokens": 0.14,
+      "costPer1MOutputTokens": 0.28,
+      "contextWindow": 64000,
+      "rateLimitPerMin": 20
+    },
+    "cloudflare/@cf/meta/llama-3-8b-instruct": {
+      "provider": "cloudflare",
+      "model": "@cf/meta/llama-3-8b-instruct",
+      "costPer1MInputTokens": 0,
+      "costPer1MOutputTokens": 0,
+      "contextWindow": 8000,
+      "rateLimitPerMin": 50
+    },
+    "cloudflare/@cf/meta/llama-3.1-70b-instruct": {
+      "provider": "cloudflare",
+      "model": "@cf/meta/llama-3.1-70b-instruct",
+      "costPer1MInputTokens": 0,
+      "costPer1MOutputTokens": 0,
+      "contextWindow": 24000,
+      "rateLimitPerMin": 50
+    }
+  },
+  "agents": {
+    "manager": {
+      "role": "manager",
+      "primary": {
+        "provider": "google",
+        "model": "gemini-3-flash",
+        "costPer1MInputTokens": 0,
+        "costPer1MOutputTokens": 0,
+        "contextWindow": 1000000,
+        "rateLimitPerMin": 15
+      },
+      "fallbacks": [
+        {
+          "provider": "cloudflare",
+          "model": "@cf/meta/llama-3.1-70b-instruct",
+          "costPer1MInputTokens": 0,
+          "costPer1MOutputTokens": 0,
+          "contextWindow": 24000
+        }
+      ]
+    },
+    "builder": {
+      "role": "builder",
+      "primary": {
+        "provider": "openrouter",
+        "model": "qwen/qwen3-coder",
+        "costPer1MInputTokens": 0.18,
+        "costPer1MOutputTokens": 0.18,
+        "contextWindow": 128000
+      },
+      "fallbacks": [
+        {
+          "provider": "cloudflare",
+          "model": "@cf/meta/llama-3.1-70b-instruct",
+          "contextWindow": 24000
+        }
+      ]
+    },
+    "reviewer": {
+      "role": "reviewer",
+      "primary": {
+        "provider": "openrouter",
+        "model": "deepseek/deepseek-chat",
+        "costPer1MInputTokens": 0.14,
+        "costPer1MOutputTokens": 0.28,
+        "contextWindow": 64000
+      },
+      "fallbacks": [
+        {
+          "provider": "google",
+          "model": "gemini-3-flash",
+          "contextWindow": 1000000
+        }
+      ]
+    }
+  }
+}

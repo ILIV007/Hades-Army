@@ -1,45 +1,33 @@
 {
-  "name": "hades-army-v0.6",
-  "version": "0.6.0",
-  "description": "Hades Army - AI Software Engineering Team. Agent Orchestrator with Repository Intelligence, Architecture Memory, Knowledge Graph, and Failure Learning.",
-  "main": "src/core/worker.ts",
+  "name": "hades-army",
+  "version": "0.8.0",
+  "description": "Autonomous AI Development Army - Cloudflare Workers Edition",
+  "type": "module",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "db:migrate": "wrangler d1 migrations apply hades-army-db",
-    "db:create": "wrangler d1 create hades-army-db",
     "test": "vitest",
+    "test:coverage": "vitest --coverage",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "wrangler d1 migrations apply hades-db",
     "lint": "eslint src/",
-    "typecheck": "tsc --noEmit"
+    "format": "prettier --write src/"
   },
   "dependencies": {
-    "@octokit/rest": "^20.0.2",
-    "telegraf": "^4.16.3",
-    "jose": "^5.2.0",
-    "zod": "^3.22.4"
+    "hono": "^4.4.0",
+    "drizzle-orm": "^0.31.0",
+    "zod": "^3.23.0"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.4.0",
     "@cloudflare/workers-types": "^4.20240614.0",
-    "typescript": "^5.4.5",
-    "wrangler": "^3.60.0",
+    "drizzle-kit": "^0.22.0",
+    "typescript": "^5.4.0",
+    "typescript-eslint": "^7.0.0",
     "vitest": "^1.6.0",
-    "eslint": "^8.57.0",
-    "@typescript-eslint/parser": "^7.0.0",
-    "@typescript-eslint/eslint-plugin": "^7.0.0"
-  },
-  "engines": {
-    "node": ">=20.0.0"
-  },
-  "keywords": [
-    "ai",
-    "agent",
-    "orchestrator",
-    "software-engineering",
-    "repository-intelligence",
-    "architecture-memory",
-    "knowledge-graph",
-    "cloudflare-workers"
-  ],
-  "author": "Hades Army Team",
-  "license": "MIT"
+    "wrangler": "^3.60.0",
+    "eslint": "^9.0.0",
+    "prettier": "^3.3.0",
+    "globals": "^15.0.0"
+  }
 }

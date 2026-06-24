@@ -1,54 +1,45 @@
 name = "hades-army"
-main = "src/worker.ts"
-compatibility_date = "2024-06-20"
+main = "src/index.ts"
+compatibility_date = "2024-06-14"
 compatibility_flags = ["nodejs_compat"]
 
 # D1 Database
 [[d1_databases]]
-binding = "DB"
-database_name = "hades-army-db"
-database_id = "42b01656-7635-46e6-96af-33fad04da241"
+binding = "HADES_DB"
+database_name = "hades-db"
+database_id = "your-database-id-here"
 
-# KV Namespaces
+# KV Namespace
 [[kv_namespaces]]
-binding = "KV_CACHE"
-id = "85b04bb029a243a4bb4a7f45e841390a"
+binding = "HADES_KV"
+id = "your-kv-namespace-id-here"
 
-[[kv_namespaces]]
-binding = "KV_SESSIONS"
-id = "your-kv-sessions-id"
+# R2 Bucket
+[[r2_buckets]]
+binding = "HADES_R2"
+bucket_name = "hades-bucket"
 
-[[kv_namespaces]]
-binding = "KV_PROJECTS"
-id = "your-kv-projects-id"
+# AI Binding
+[ai]
+binding = "AI"
 
 # Environment Variables
 [vars]
-ENVIRONMENT = "production"
-GITHUB_WEBHOOK_SECRET = ""
-TELEGRAM_BOT_TOKEN = ""
-OPENROUTER_API_KEY = ""
-GOOGLE_AI_API_KEY = ""
+NODE_ENV = "production"
+LOG_LEVEL = "info"
 
-# Secrets (use wrangler secret put)
-# GITHUB_TOKEN
-# OPENROUTER_API_KEY
-# GOOGLE_AI_API_KEY
+# Secrets (use `wrangler secret put`)
 # TELEGRAM_BOT_TOKEN
-# JWT_SECRET
-# ENCRYPTION_KEY
+# OPENAI_API_KEY
+# ANTHROPIC_API_KEY
+# GITHUB_TOKEN
+# ADMIN_API_TOKEN
+# API_KEYS
 
-# R2 Bucket for file storage
-[[r2_buckets]]
-binding = "FILE_STORAGE"
-bucket_name = "hades-army-files"
+# Cron Triggers
+[[triggers]]
+crons = ["*/5 * * * *", "0 * * * *", "0 0 * * *"]
 
-# Queue for background jobs
-[[queues.producers]]
-binding = "JOB_QUEUE"
-queue = "hades-army-jobs"
-
-[[queues.consumers]]
-queue = "hades-army-jobs"
-max_batch_size = 10
-max_batch_timeout = 30
+# Build
+[build]
+command = "npm run build"

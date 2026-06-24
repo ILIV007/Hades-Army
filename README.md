@@ -1,153 +1,88 @@
-# ⚔️ Hades Army v0.2.1
+# 🏛️⚔️ Hades Army
 
-**Multi-Agent AI Software Development Team**
+> **Autonomous AI Development Army - Cloudflare Workers Edition**
 
-Hades Army is a Cloudflare-based AI orchestration system that acts as a software development team inside your Telegram chat.
+[![Version](https://img.shields.io/badge/version-0.8.0-blue.svg)](https://github.com/hades-army/hades-army)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Workers](https://img.shields.io/badge/platform-Cloudflare%20Workers-orange.svg)](https://workers.cloudflare.com)
 
-## 🏗️ Architecture v0.2.1
+## 📋 Table of Contents
 
-```
-User (Telegram)
- ↓
-Cloudflare Worker
- ↓
-Orchestrator
- ├── Project Manager
- ├── Task Planner (Registry-driven)
- ├── Execution Coordinator
- └── Approval Handler
- ↓
-Manager Agent → Google AI Studio (gemini-3-flash)
- ↓
-Builder Agent → OpenRouter (qwen/qwen3-coder) → Patch
- ↓
-Reviewer Agent → OpenRouter (deepseek/deepseek-v3.1) → PASS/FAIL
- ↓
-GitHub: Blob → Tree → Commit → Ref → PR
- ↓
-User Approval → Merge
- ↓
-Memory Sync: D1 ↔ .hades/ ↔ KV
-```
+- [Overview](#overview)
+- [Features](#features)
+- [Architecture](#architecture)
+- [Quick Start](#quick-start)
+- [Configuration](#configuration)
+- [API Reference](#api-reference)
+- [Deployment](#deployment)
+- [Development](#development)
+- [Security](#security)
+- [Monitoring](#monitoring)
+- [Contributing](#contributing)
 
-## ✅ v0.2.1 Changes
+---
 
-| Fix | Description |
-|-----|-------------|
-| #1 | Manager → Google AI Studio (provider: "google") |
-| #2 | Builder → Registry-driven (no hardcoding) |
-| #3 | Reviewer → Registry-driven (no hardcoding) |
-| #4 | Task Planner → Registry-driven (no hardcoding) |
-| #5 | Registry Validation — throws if config missing |
-| #6 | Model Capability Validation — pattern matching per role |
-| #7 | Single Source of Truth — only agents.config.ts defines models |
-| #8 | Boot-Time Audit — /health endpoint validates all agents |
-| #9 | Agent Metadata — capabilities, restrictions, temperature, maxTokens |
+## 🎯 Overview
 
-## 🚀 Quick Start
+Hades Army is an autonomous AI development platform designed to run on Cloudflare Workers. It provides a complete ecosystem for managing AI agents, code reviews, approvals, memory management, and deployments — all serverless at the edge.
 
-### Prerequisites
-- Cloudflare account
-- Telegram Bot (@BotFather)
-- GitHub Personal Access Token
-- OpenRouter API Key
-- Google AI Studio API Key (for Manager)
+### Key Capabilities
 
-### Setup
+- 🤖 **Multi-Agent System** — Builder, Reviewer, Analyzer, Tester, Deployer agents
+- 🔍 **7-Stage Code Review** — Syntax, Security, Performance, Architecture, Style, Tests, Documentation
+- ✅ **Approval Workflows** — Multi-level approval with escalation policies
+- 🧠 **Memory Management** — Persistent storage with versioning and rollback
+- 📊 **Real-time Monitoring** — Health checks, metrics, and alerting
+- 🔐 **Security First** — Secret scanning, RBAC, audit logging
+- ☁️ **Cloudflare Native** — D1, KV, R2, Workers AI, Queues, Cron Triggers
 
-```bash
-npm install
+---
 
-# Set secrets
-wrangler secret put TELEGRAM_BOT_TOKEN
-wrangler secret put OPENROUTER_API_KEY
-wrangler secret put GITHUB_TOKEN
-wrangler secret put ENCRYPTION_KEY  # openssl rand -base64 32
-wrangler secret put GOOGLE_AI_API_KEY  # Required for Manager
+## ✨ Features
 
-# Create D1 database in Dashboard, update wrangler.toml
-# Create KV namespace in Dashboard, update wrangler.toml
+### Agent Management
 
-# Run migrations
-npm run db:migrate
+| Agent Type | Role | Status |
+|------------|------|--------|
+| Builder | Code generation & file creation | ✅ Active |
+| Reviewer | 7-stage code review pipeline | ✅ Active |
+| Analyzer | Security & performance analysis | ✅ Active |
+| Tester | Automated testing & validation | ✅ Active |
+| Deployer | Deployment & release management | ✅ Active |
 
-# Deploy
-npm run deploy
+### API Endpoints
 
-# Set webhook
-GET https://your-worker.workers.dev/setup-webhook
-```
+| Endpoint | Method | Description | Auth |
+|----------|--------|-------------|------|
+| `/api/v1/agents` | GET, POST | List/create agents | Required |
+| `/api/v1/agents/:id` | GET, PATCH, DELETE | Manage agent | Required |
+| `/api/v1/reviews` | GET, POST | List/create reviews | Required |
+| `/api/v1/approvals` | GET, POST | Approval requests | Required |
+| `/api/v1/memory` | GET, POST | Memory entries | Required |
+| `/api/v1/rollback` | GET, POST | Snapshots & rollback | Required |
+| `/api/v1/prompts` | GET, POST | Prompt templates | Required |
+| `/api/v1/health` | GET | Health checks | Public |
+| `/metrics` | GET | Prometheus metrics | Public |
+| `/webhook/telegram` | POST | Telegram bot webhook | Public |
+| `/webhook/github` | POST | GitHub webhook | Public |
 
-## 📁 Project Structure
+### Database Schema (15 Tables)
 
-```
-src/
-├── worker.ts              # Entry point + Boot Audit
-├── core/
-│   ├── orchestrator.ts    # Request router
-│   ├── workflow.ts        # State machine engine
-│   └── managers/
-│       ├── project.manager.ts
-│       ├── task.planner.ts      # ← Registry-driven
-│       ├── execution.coordinator.ts
-│       └── approval.handler.ts
-├── agents/
-│   ├── builder.ts         # ← Registry-driven
-│   ├── reviewer.ts        # ← Registry-driven
-│   └── registry.ts        # ← Boot-time validation
-├── services/
-│   ├── llm.service.ts     # OpenRouter + Google AI Studio
-│   ├── github.service.ts
-│   ├── telegram.service.ts
-│   ├── task.service.ts
-│   └── prompt.service.ts
-├── github/clients/
-│   ├── base.client.ts
-│   ├── repo.client.ts
-│   ├── branch.client.ts
-│   ├── pr.client.ts
-│   └── commit.client.ts
-├── memory/
-│   ├── d1.client.ts
-│   ├── kv.client.ts
-│   └── hades.memory.ts
-├── utils/
-│   ├── crypto.ts
-│   ├── logger.ts
-│   ├── helpers.ts
-│   └── patch-parser.ts
-├── types/                 # All TypeScript types
-├── config/
-│   ├── env.ts
-│   └── agents.config.ts   # ← SINGLE SOURCE OF TRUTH
-└── database/schema.sql
-```
+- `agents` — Agent registry
+- `agent_tasks` — Task execution log
+- `reviews` — Code review results
+- `approval_requests` — Approval workflow
+- `memory_entries` — Key-value storage
+- `memory_versions` — Version history
+- `rollback_snapshots` — System snapshots
+- `rollback_operations` — Rollback audit
+- `prompt_templates` — AI prompt library
+- `scheduled_jobs` — Cron job definitions
+- `jobs` — Background job queue
+- `alerts` — Alert history
+- `metrics` — Time-series data
+- `config` — System configuration
 
-## 🔒 Security
-- GitHub tokens encrypted with AES-GCM
-- All secrets via Cloudflare Worker secrets
-- File locking prevents concurrent modifications
-- No critical data in LLM context
+---
 
-## 📊 Task State Machine
-```
-CREATED → PLANNING → READY → BUILDING → REVIEWING → PR_CREATED → WAITING_APPROVAL → MERGED → COMPLETED
-```
-
-## 🔍 Boot-Time Audit
-
-Visit `/health` to see real-time validation:
-
-```json
-{
-  "status": "ok",
-  "version": "0.2.1",
-  "audit": [
-    { "name": "manager config", "status": "pass", "message": "google / gemini-3-flash" },
-    { "name": "builder config", "status": "pass", "message": "openrouter / qwen/qwen3-coder" },
-    { "name": "reviewer config", "status": "pass", "message": "openrouter / deepseek/deepseek-v3.1" }
-  ]
-}
-```
-
-Built with ⚔️ by Hades Army
+## 🏗️ Architecture
