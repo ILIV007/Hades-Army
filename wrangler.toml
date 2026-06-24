@@ -7,12 +7,12 @@ compatibility_flags = ["nodejs_compat"]
 [[d1_databases]]
 binding = "HADES_DB"
 database_name = "hades-db"
-database_id = "your-database-id-here"
+database_id = "42b01656-7635-46e6-96af-33fad04da241"
 
 # KV Namespace
 [[kv_namespaces]]
 binding = "HADES_KV"
-id = "your-kv-namespace-id-here"
+id = "85b04bb029a243a4bb4a7f45e841390a"
 
 # R2 Bucket
 [[r2_buckets]]
