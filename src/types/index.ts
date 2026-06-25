@@ -231,8 +231,14 @@ export interface HealthReport {
 export interface HadesBindings {
   HADES_DB: D1Database;
   HADES_KV: KVNamespace;
-  HADES_R2: R2Bucket;
+  // R2 is reserved for future use (v0.10+). It is optional so the
+  // worker can deploy without the binding being present in wrangler.toml.
+  HADES_R2?: R2Bucket;
   AI: Ai;
+  // v0.8.5 — Model Registry providers
+  GOOGLE_AI_API_KEY?: string;
+  OPENROUTER_API_KEY?: string;
+  // v0.8.0 — legacy providers (still used by ai-factory.ts fallback chain)
   TELEGRAM_BOT_TOKEN?: string;
   OPENAI_API_KEY?: string;
   ANTHROPIC_API_KEY?: string;
@@ -241,6 +247,7 @@ export interface HadesBindings {
   API_KEYS?: string;
   NODE_ENV?: string;
   LOG_LEVEL?: string;
+  HADES_VERSION?: string;
 }
 
 export interface HadesContext extends Context {
