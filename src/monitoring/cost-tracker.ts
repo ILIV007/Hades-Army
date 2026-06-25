@@ -226,3 +226,14 @@ export class CostTracker {
     return ts >= monthStart.getTime();
   }
 }
+
+// ============================================
+// Factory (added in v9.2-fix — used by admin-api.ts)
+// ============================================
+
+let _costTrackerInstance: CostTracker | null = null;
+
+export function getCostTracker(env: HadesBindings): CostTracker {
+  if (!_costTrackerInstance) _costTrackerInstance = new CostTracker(env);
+  return _costTrackerInstance;
+}

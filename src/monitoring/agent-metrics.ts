@@ -194,3 +194,14 @@ export class AgentMetrics {
     await this.env.HADES_KV.put(KV_KEY_STAGE_TIMINGS, JSON.stringify(list.slice(-1000)));
   }
 }
+
+// ============================================
+// Factory (added in v9.2-fix — used by admin-api.ts)
+// ============================================
+
+let _agentMetricsInstance: AgentMetrics | null = null;
+
+export function getAgentMetrics(env: HadesBindings): AgentMetrics {
+  if (!_agentMetricsInstance) _agentMetricsInstance = new AgentMetrics(env);
+  return _agentMetricsInstance;
+}
