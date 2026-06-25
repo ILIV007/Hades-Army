@@ -38,7 +38,7 @@ binding = "AI"
 [vars]
 NODE_ENV = "production"
 LOG_LEVEL = "info"
-HADES_VERSION = "0.9.2"
+HADES_VERSION = "9.2-fix"
 
 # ============================================
 # Secrets — set with: wrangler secret put <NAME>
