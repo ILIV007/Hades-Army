@@ -115,15 +115,155 @@ app.use("*", async (c, next) => {
 });
 
 // ============================================
-// Telegram Webhook Route
+// Telegram Webhook Route (v9.2 — uses hardened pipeline)
 // ============================================
+//
+// CRITICAL FIX (v9.2): The webhook now routes through the new
+// TelegramPipeline which guarantees:
+//   1. Every update gets a response (no silent failures)
+//   2. Manager startup failures are isolated
+//   3. Memory failures are non-fatal
+//   4. Mode defaults to "plan" if missing
+//   5. Missing project → onboarding guidance (not silent return)
+//   6. Mandatory fallback message on any error
 
 app.post("/webhook/telegram", async (c) => {
-  const bot = createTelegramBot(c.env);
-  if (!bot) {
-    return c.json({ error: "Telegram bot not configured" }, 503);
+  // Initialize startup (logger + secret validation) — but NEVER
+  // block the Telegram webhook. Even if critical secrets are
+  // missing, the bot must respond with a clear message.
+  try {
+    initializeStartup(c.env);
+  } catch {
+    // ignore — startup validation may fail in degraded mode,
+    // but Telegram must still respond
   }
-  return bot.handleWebhook(c.req.raw);
+
+  let update: any;
+  try {
+    update = await c.req.json();
+  } catch (err) {
+    logger.error("[TG Webhook] Failed to parse JSON body", {
+      err: err instanceof Error ? err.message : String(err),
+    });
+    return c.json({ ok: false, error: "invalid_json" }, 400);
+  }
+
+  // Delegate to the hardened pipeline — it NEVER throws
+  const { getTelegramPipeline } = await import("./integrations/telegram-pipeline");
+  const pipeline = getTelegramPipeline(c.env);
+  const result = await pipeline.processUpdate(update);
+
+  // Always return 200 OK so Telegram doesn't retry
+  return c.json({ ok: result.ok, traceId: result.traceId });
+});
+
+// ============================================
+// Health Endpoints (v9.2)
+// ============================================
+
+app.get("/health", async (c) => {
+  return c.json({
+    status: "ok",
+    version: c.env.HADES_VERSION ?? "unknown",
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.get("/health/telegram", async (c) => {
+  const botToken = c.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) {
+    return c.json({
+      status: "degraded",
+      botTokenConfigured: false,
+      message: "TELEGRAM_BOT_TOKEN not set",
+    });
+  }
+
+  try {
+    const { getTelegramService } = await import("./integrations/telegram-service");
+    const service = getTelegramService(c.env);
+    if (!service) {
+      return c.json({ status: "degraded", message: "Service initialization failed" });
+    }
+    const webhookInfo = await service.getWebhookInfo();
+    return c.json({
+      status: webhookInfo.ok ? "ok" : "degraded",
+      botTokenConfigured: true,
+      webhook: webhookInfo.info,
+      error: webhookInfo.error,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    return c.json({
+      status: "failed",
+      error: err instanceof Error ? err.message : String(err),
+    }, 500);
+  }
+});
+
+// ============================================
+// Admin Debug Center (v9.2)
+// ============================================
+//
+// Protected by ADMIN_API_TOKEN. Normal users must never access this.
+// Serves:
+//   GET  /admin                → HTML dashboard
+//   GET  /admin/api/<section>  → JSON data for each section
+//   POST /admin/api/emergency/{enable|disable}
+
+app.get("/admin", async (c) => {
+  const authHeader = c.req.header("Authorization") ?? c.req.query("token");
+  const { authenticateAdmin } = await import("./admin/admin-api");
+  if (!authenticateAdmin(authHeader, c.env)) {
+    return c.html(
+      `<html><body style="font-family:sans-serif;padding:40px;text-align:center">
+      <h2>🔒 Hades Admin — Authentication Required</h2>
+      <p>Provide <code>Authorization: Bearer &lt;ADMIN_API_TOKEN&gt;</code> header or <code>?token=&lt;ADMIN_API_TOKEN&gt;</code> query parameter.</p>
+      </body></html>`,
+      401,
+    );
+  }
+  const { renderAdminDashboard } = await import("./admin/admin-dashboard");
+  return c.html(renderAdminDashboard(c.env));
+});
+
+app.all("/admin/api/*", async (c) => {
+  const authHeader = c.req.header("Authorization") ?? c.req.query("token");
+  const { authenticateAdmin, getAdminApi } = await import("./admin/admin-api");
+  if (!authenticateAdmin(authHeader, c.env)) {
+    return c.json({ error: "unauthorized" }, 401);
+  }
+
+  const path = new URL(c.req.url).pathname;
+  const section = path.replace("/admin/api/", "");
+  const api = getAdminApi(c.env);
+
+  try {
+    let result: unknown;
+    switch (section) {
+      case "overview": result = await api.overview(); break;
+      case "telegram": result = await api.telegram(); break;
+      case "agents": result = await api.agents(); break;
+      case "tasks": result = await api.tasks(); break;
+      case "errors": result = await api.errors(); break;
+      case "memory": result = await api.memory(); break;
+      case "github": result = await api.github(); break;
+      case "llm-usage": result = await api.llmUsage(); break;
+      case "timeline": result = await api.timeline(); break;
+      case "conversations": result = await api.conversations(); break;
+      case "performance": result = await api.performance(); break;
+      case "deployment": result = await api.deployment(); break;
+      case "logs": result = await api.logs(); break;
+      case "emergency/status": result = await api.emergency("status"); break;
+      case "emergency/enable": result = await api.emergency("enable"); break;
+      case "emergency/disable": result = await api.emergency("disable"); break;
+      default: return c.json({ error: "unknown_section", section }, 404);
+    }
+    return c.json(result);
+  } catch (err) {
+    logger.error("Admin API error", { section, err: err instanceof Error ? err.message : String(err) });
+    return c.json({ error: "internal", section, message: err instanceof Error ? err.message : String(err) }, 500);
+  }
 });
 
 // ============================================

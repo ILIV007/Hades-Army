@@ -62,13 +62,18 @@ const WORKFLOW_BLOCKING_SECRETS: Array<keyof HadesBindings> = [
 ];
 
 // Routes that are blocked when workflow-blocking secrets are missing.
-// Other routes (health, status, menu) continue to work so the user
-// can see WHAT is missing and fix it.
+// Other routes (health, status, menu, telegram) continue to work so
+// the user can see WHAT is missing and fix it.
+//
+// CRITICAL (v9.2 fix): Telegram webhook MUST NOT be in this list.
+// Blocking the webhook caused the entire bot to go silent — the
+// user got no response at all, even to /start. The bot must always
+// be able to respond (even with a "missing secrets" message).
 const BLOCKED_ROUTES_WHEN_MISSING: string[] = [
-  "/webhook/telegram",
   "/api/v1/workflows",
   "/api/v1/agents",
   "/api/v1/repositories",
+  "/api/v1/tasks",
 ];
 
 export class ControlledCrashValidator {
