@@ -38,7 +38,7 @@ binding = "AI"
 [vars]
 NODE_ENV = "production"
 LOG_LEVEL = "info"
-HADES_VERSION = "0.9.1"
+HADES_VERSION = "0.9.2"
 
 # ============================================
 # Secrets — set with: wrangler secret put <NAME>
@@ -62,12 +62,25 @@ HADES_VERSION = "0.9.1"
 # ============================================
 
 # ============================================
-# Cron Triggers
-# NOTE: [triggers] (single section) — NOT [[triggers]] (array item).
-# Wrangler v3 and v4 both expect the singular form.
+# Cron Triggers — DISABLED in v0.9.2
 # ============================================
-[triggers]
-crons = ["*/5 * * * *", "0 * * * *", "0 0 * * *"]
+# Cloudflare reported: "Some triggers failed to deploy" because the
+# scheduled handler in src/index.ts calls services that need secrets
+# not yet present at deploy time.
+#
+# Per v0.9.2 spec: cron triggers are REMOVED until the following
+# features are properly implemented and tested:
+#   - Memory Cleanup (background)
+#   - Background Jobs queue
+#   - Learning Engine
+#   - Queue Processing
+#
+# To re-enable, UNCOMMENT the section below AND ensure the `scheduled`
+# handler in src/index.ts is also restored. The handler has been
+# reduced to a no-op logger in v0.9.2.
+#
+# [triggers]
+# crons = ["*/5 * * * *", "0 * * * *", "0 0 * * *"]
 
 # ============================================
 # Build
