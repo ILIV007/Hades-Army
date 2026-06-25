@@ -3,43 +3,70 @@ main = "src/index.ts"
 compatibility_date = "2024-06-14"
 compatibility_flags = ["nodejs_compat"]
 
+# ============================================
 # D1 Database
+# ============================================
 [[d1_databases]]
 binding = "HADES_DB"
 database_name = "hades-db"
 database_id = "42b01656-7635-46e6-96af-33fad04da241"
 
+# ============================================
 # KV Namespace
+# ============================================
 [[kv_namespaces]]
 binding = "HADES_KV"
 id = "85b04bb029a243a4bb4a7f45e841390a"
 
-# R2 Bucket
-[[r2_buckets]]
-binding = "HADES_R2"
-bucket_name = "hades-bucket"
+# ============================================
+# R2 Bucket — RESERVED FOR FUTURE USE (v0.10+)
+# Uncomment when R2 is provisioned:
+# [[r2_buckets]]
+# binding = "HADES_R2"
+# bucket_name = "hades-bucket"
+# ============================================
 
-# AI Binding
+# ============================================
+# AI Binding (Cloudflare Workers AI — free tier)
+# ============================================
 [ai]
 binding = "AI"
 
-# Environment Variables
+# ============================================
+# Environment Variables (non-secret)
+# ============================================
 [vars]
 NODE_ENV = "production"
 LOG_LEVEL = "info"
+HADES_VERSION = "0.9.0"
 
-# Secrets (use `wrangler secret put`)
-# TELEGRAM_BOT_TOKEN
-# OPENAI_API_KEY
-# ANTHROPIC_API_KEY
-# GITHUB_TOKEN
-# ADMIN_API_TOKEN
-# API_KEYS
+# ============================================
+# Secrets — set with: wrangler secret put <NAME>
+#   TELEGRAM_BOT_TOKEN     — Telegram bot token from @BotFather
+#   GITHUB_TOKEN           — GitHub PAT with repo scope
+#   GOOGLE_AI_API_KEY      — Google AI Studio (Gemini 3 Flash) — Manager
+#   OPENROUTER_API_KEY     — OpenRouter (Qwen3-Coder + DeepSeek) — Builder + Reviewer
+#   ADMIN_API_TOKEN        — Admin token for REST API
+#   API_KEYS               — Comma-separated API keys for REST API
+# ============================================
 
+# ============================================
 # Cron Triggers
-[[triggers]]
+# NOTE: [triggers] (single section) — NOT [[triggers]] (array item).
+# Wrangler v3 and v4 both expect the singular form.
+# ============================================
+[triggers]
 crons = ["*/5 * * * *", "0 * * * *", "0 0 * * *"]
 
+# ============================================
 # Build
-[build]
-command = "npm run build"
+# ============================================
+# Hades Army is a TypeScript-only Worker — no build step is required.
+# Wrangler bundles TypeScript natively via esbuild, so we intentionally
+# omit the [build] section. This fixes the previous "Missing script: build"
+# error that was blocking Cloudflare Pages deploy.
+#
+# If you later need a pre-deploy build (e.g. codegen), add:
+#   [build]
+#   command = "npm run build"
+# and ensure package.json has a matching "build" script.
