@@ -28,6 +28,8 @@ import { workersManager } from "./workers/manager";
 import { schedulerManager } from "./scheduler/manager";
 import { logger, configureLogger } from "./utils/logger";
 import { validateSecretsAtStartup, type SecretValidationResult } from "./security/startup-validator";
+import { getControlledCrashValidator, type StartupCheckResult } from "./security/controlled-crash-validator";
+import { getConfigDriftDetector } from "./security/config-drift-detector";
 import { generateId } from "./utils/helpers";
 import { appManager } from "./core/application";
 import type { HadesContext, HadesBindings } from "./types";
@@ -49,32 +51,66 @@ const app = createRouter();
 
 let _startupInitialized = false;
 let _startupValidation: SecretValidationResult | null = null;
+let _startupCheck: StartupCheckResult | null = null;
 
-function initializeStartup(env: HadesBindings): SecretValidationResult {
+function initializeStartup(env: HadesBindings): StartupCheckResult {
   if (!_startupInitialized) {
     configureLogger(env);
-    _startupValidation = validateSecretsAtStartup(env);
+    const crashValidator = getControlledCrashValidator();
+    _startupCheck = crashValidator.check(env);
+    _startupValidation = _startupCheck.result;
     _startupInitialized = true;
 
     // Log the startup result (without leaking secret values)
-    if (_startupValidation.ok) {
+    if (_startupCheck.ok) {
       logger.info("Hades Army startup: all critical secrets present", {
         version: env.HADES_VERSION ?? "unknown",
         checked: _startupValidation.checked.length,
       });
-    } else {
-      logger.warn("Hades Army startup: missing critical secrets — running in degraded mode", {
+    } else if (_startupCheck.blockingWorkflow) {
+      logger.error("Hades Army startup: BLOCKED — missing workflow-critical secrets", {
         missing: _startupValidation.missing,
+        blockedRoutes: _startupCheck.blockedRoutes,
+      });
+    } else {
+      logger.warn("Hades Army startup: running in degraded mode", {
         warnings: _startupValidation.warnings,
       });
     }
+
+    // Also check config drift (passive — warnings only)
+    try {
+      const driftDetector = getConfigDriftDetector();
+      const drift = driftDetector.detect(env);
+      if (drift.hasDrift) {
+        logger.warn("Hades Army startup: config drift detected", {
+          driftCount: drift.driftCount,
+          items: drift.items.map((i) => `${i.name} (${i.issue})`),
+        });
+      }
+    } catch (err) {
+      logger.warn("Hades Army startup: drift check failed", { err });
+    }
   }
-  return _startupValidation!;
+  return _startupCheck!;
 }
 
 // Run startup init on every request (cheap — cached after first call)
+// Also gate workflow-blocking routes when critical secrets are missing.
 app.use("*", async (c, next) => {
-  initializeStartup(c.env);
+  const check = initializeStartup(c.env);
+
+  // If the Worker is in blocking mode, refuse workflow-related routes
+  // with a clear 503 error. Health and static routes still work.
+  if (check.blockingWorkflow) {
+    const path = new URL(c.req.url).pathname;
+    if (check.blockedRoutes.some((route) => path.startsWith(route))) {
+      const validator = getControlledCrashValidator();
+      const errBody = validator.renderBlockedResponse(check.result.missing);
+      return c.json(errBody.body, errBody.status);
+    }
+  }
+
   await next();
 });
 
@@ -215,43 +251,26 @@ export default {
   },
 
   // Scheduled task handler (Cron Triggers)
+  // ============================================
+  // v0.9.2: Cron triggers are DISABLED in wrangler.toml because they
+  // were failing to deploy. This handler is kept as a no-op so it
+  // doesn't break the Worker export shape — once the background jobs
+  // (memory cleanup, learning engine, queue processing) are properly
+  // implemented, re-enable [triggers] in wrangler.toml and restore
+  // the switch statement below.
+  // ============================================
   async scheduled(
     event: ScheduledEvent,
     env: Record<string, unknown>,
-    ctx: ExecutionContext
+    _ctx: ExecutionContext
   ): Promise<void> {
-    // Initialize logger + validate secrets (cron may fire before any HTTP request)
-    initializeStartup(env as HadesBindings);
-    logger.info(`Scheduled task triggered: ${event.cron}`);
-
-    ctx.waitUntil(
-      (async () => {
-        try {
-          switch (event.cron) {
-            case "*/5 * * * *":
-              // Every 5 minutes: Health check
-              await healthService.getHealthReport(env as Record<string, unknown>);
-              break;
-
-            case "0 * * * *":
-              // Every hour: Metrics collection
-              await metricsService.collectAll(env as Record<string, unknown>);
-              break;
-
-            case "0 0 * * *":
-              // Daily: Cleanup expired data
-              await memoryManager.cleanupExpired(env as Record<string, unknown>);
-              await approvalManager.processExpiredRequests(env as Record<string, unknown>);
-              break;
-
-            default:
-              logger.info(`Unknown cron schedule: ${event.cron}`);
-          }
-        } catch (err) {
-          logger.error("Scheduled task error", { error: err instanceof Error ? err.message : String(err) });
-        }
-      })()
-    );
+    try {
+      initializeStartup(env as HadesBindings);
+    } catch {
+      // ignore — startup validation may fail in degraded mode
+    }
+    logger.info(`Scheduled task triggered (no-op in v0.9.2): ${event.cron}`);
+    // No work performed — see comment above.
   },
 
   // Queue handler (for Cloudflare Queue)
