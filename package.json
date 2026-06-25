@@ -1,6 +1,6 @@
 {
   "name": "hades-army",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Hades Army — Autonomous Repository-Aware Development Team (Cloudflare Workers Edition)",
   "type": "module",
   "scripts": {
@@ -16,6 +16,8 @@
     "db:migrate": "wrangler d1 migrations apply hades-db",
     "db:migrate:v085": "wrangler d1 execute hades-db --file=./sql/v0.8.5-additions.sql",
     "db:migrate:v090": "wrangler d1 execute hades-db --file=./sql/v0.9.0-additions.sql",
+    "db:migrate:v091": "wrangler d1 execute hades-db --file=./sql/v0.9.1-additions.sql",
+    "db:migrate:all": "npm run db:migrate:v085 && npm run db:migrate:v090 && npm run db:migrate:v091",
     "lint": "eslint src/",
     "format": "prettier --write src/",
     "validate": "npm run typecheck && npm run lint",

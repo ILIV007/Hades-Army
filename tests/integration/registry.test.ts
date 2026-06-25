@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
-import { ModelRegistry } from "../../src/registry/model-registry";
+import { ModelRegistry, assertNoHardcodedModels } from "../../src/registry/model-registry";
 import type { HadesBindings } from "../../src/types";
 
 function makeMockEnv(overrides: Partial<HadesBindings> = {}): HadesBindings {
@@ -133,14 +133,12 @@ describe("Model Registry Integration", () => {
 
   describe("Hardcoded model detection (CI helper)", () => {
     it("should flag direct model string literals", () => {
-      const { assertNoHardcodedModels } = require("../../src/registry/model-registry");
       const badSource = `const model = "gpt-4o";`;
       const violations = assertNoHardcodedModels(badSource, "test-agent");
       expect(violations.length).toBeGreaterThan(0);
     });
 
     it("should not flag registry lookups", () => {
-      const { assertNoHardcodedModels } = require("../../src/registry/model-registry");
       const goodSource = `const model = registry.getModelForAgent("manager");`;
       const violations = assertNoHardcodedModels(goodSource, "test-agent");
       expect(violations).toEqual([]);

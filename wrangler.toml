@@ -38,16 +38,27 @@ binding = "AI"
 [vars]
 NODE_ENV = "production"
 LOG_LEVEL = "info"
-HADES_VERSION = "0.9.0"
+HADES_VERSION = "0.9.1"
 
 # ============================================
 # Secrets — set with: wrangler secret put <NAME>
+#
+# CRITICAL (Worker starts in degraded mode without these):
 #   TELEGRAM_BOT_TOKEN     — Telegram bot token from @BotFather
 #   GITHUB_TOKEN           — GitHub PAT with repo scope
 #   GOOGLE_AI_API_KEY      — Google AI Studio (Gemini 3 Flash) — Manager
 #   OPENROUTER_API_KEY     — OpenRouter (Qwen3-Coder + DeepSeek) — Builder + Reviewer
-#   ADMIN_API_TOKEN        — Admin token for REST API
+#   ADMIN_API_TOKEN        — Admin token for REST API (min 16 chars)
+#   JWT_SECRET             — JWT signing secret (min 32 chars)
+#   ENCRYPTION_KEY         — At-rest encryption key (min 32 chars)
+#
+# RECOMMENDED:
 #   API_KEYS               — Comma-separated API keys for REST API
+#   GITHUB_WEBHOOK_SECRET  — GitHub webhook signature verification
+#
+# OPTIONAL (legacy fallback):
+#   OPENAI_API_KEY         — Legacy OpenAI fallback
+#   ANTHROPIC_API_KEY      — Legacy Anthropic fallback
 # ============================================
 
 # ============================================
