@@ -26,16 +26,57 @@ import { rollbackManager } from "./rollback/manager";
 import { promptManager } from "./prompts/manager";
 import { workersManager } from "./workers/manager";
 import { schedulerManager } from "./scheduler/manager";
-import { logger } from "./utils/logger";
+import { logger, configureLogger } from "./utils/logger";
+import { validateSecretsAtStartup, type SecretValidationResult } from "./security/startup-validator";
 import { generateId } from "./utils/helpers";
 import { appManager } from "./core/application";
-import type { HadesContext } from "./types";
+import type { HadesContext, HadesBindings } from "./types";
 
 // ============================================
 // Main Application
 // ============================================
 
 const app = createRouter();
+
+// ============================================
+// Startup Initialization (per-Worker, cached)
+// ============================================
+//
+// Cloudflare Workers are stateless across isolates, but each isolate
+// handles many requests. We configure the logger and validate secrets
+// ONCE per isolate, on the first request it sees. Subsequent requests
+// reuse the cached configuration.
+
+let _startupInitialized = false;
+let _startupValidation: SecretValidationResult | null = null;
+
+function initializeStartup(env: HadesBindings): SecretValidationResult {
+  if (!_startupInitialized) {
+    configureLogger(env);
+    _startupValidation = validateSecretsAtStartup(env);
+    _startupInitialized = true;
+
+    // Log the startup result (without leaking secret values)
+    if (_startupValidation.ok) {
+      logger.info("Hades Army startup: all critical secrets present", {
+        version: env.HADES_VERSION ?? "unknown",
+        checked: _startupValidation.checked.length,
+      });
+    } else {
+      logger.warn("Hades Army startup: missing critical secrets — running in degraded mode", {
+        missing: _startupValidation.missing,
+        warnings: _startupValidation.warnings,
+      });
+    }
+  }
+  return _startupValidation!;
+}
+
+// Run startup init on every request (cheap — cached after first call)
+app.use("*", async (c, next) => {
+  initializeStartup(c.env);
+  await next();
+});
 
 // ============================================
 // Telegram Webhook Route
@@ -117,6 +158,9 @@ app.get("/metrics", async (c) => {
 export default {
   // HTTP request handler
   async fetch(request: Request, env: Record<string, unknown>, ctx: ExecutionContext): Promise<Response> {
+    // Initialize logger + validate secrets on first request per isolate
+    initializeStartup(env as HadesBindings);
+
     // Set up request context
     const requestId = generateId("req");
     const startTime = Date.now();
@@ -176,6 +220,8 @@ export default {
     env: Record<string, unknown>,
     ctx: ExecutionContext
   ): Promise<void> {
+    // Initialize logger + validate secrets (cron may fire before any HTTP request)
+    initializeStartup(env as HadesBindings);
     logger.info(`Scheduled task triggered: ${event.cron}`);
 
     ctx.waitUntil(

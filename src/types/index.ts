@@ -245,6 +245,10 @@ export interface HadesBindings {
   GITHUB_TOKEN?: string;
   ADMIN_API_TOKEN?: string;
   API_KEYS?: string;
+  // v0.9.1 — Security secrets
+  JWT_SECRET?: string;          // for signing session tokens (min 32 chars)
+  ENCRYPTION_KEY?: string;      // for at-rest encryption of stored secrets (min 32 chars)
+  GITHUB_WEBHOOK_SECRET?: string;
   NODE_ENV?: string;
   LOG_LEVEL?: string;
   HADES_VERSION?: string;

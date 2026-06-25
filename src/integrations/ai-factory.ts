@@ -28,7 +28,10 @@ export class OpenAIProvider implements AIProvider {
         Authorization: `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify({
-        model: options?.model || "gpt-4o",
+        // v0.9.1: hardcoded model defaults removed.
+        // Callers MUST pass options.model — the Model Registry is the
+        // single source of truth for model selection.
+        model: options?.model || (() => { throw new Error("OpenAIProvider: options.model is required (use ModelRegistry)"); })(),
         messages: [{ role: "user", content: prompt }],
         max_tokens: options?.maxTokens || 2000,
       }),
@@ -57,7 +60,8 @@ export class AnthropicProvider implements AIProvider {
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model: options?.model || "claude-3-sonnet-20240229",
+        // v0.9.1: hardcoded model defaults removed.
+        model: options?.model || (() => { throw new Error("AnthropicProvider: options.model is required (use ModelRegistry)"); })(),
         max_tokens: options?.maxTokens || 2000,
         messages: [{ role: "user", content: prompt }],
       }),

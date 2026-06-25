@@ -21,8 +21,14 @@ import { logger } from "../utils/logger";
 import type { HadesBindings } from "../types";
 import { TelegramHandlers, type HandlerContext, type HandlerResult } from "./handlers";
 import { renderMainMenu } from "./menu";
+import { renderMainMenuV09 } from "./menu-v09";
 import { getManagerController } from "../orchestration/manager-controller";
 import { renderWorkflowStarted, renderStageProgress } from "./progress";
+import { getModeManager } from "../modes/operation-modes";
+import { getConversationMemory } from "../memory/conversation-memory";
+import { getRepositoryManager } from "../github/repository-manager";
+import { runHealthCheck, renderHealthReport } from "../monitoring/health-dashboard";
+import { renderMemoryDashboard } from "./dashboards";
 
 // ============================================
 // Types
@@ -78,9 +84,61 @@ export class TelegramController {
     const chatId = msg.chat.id;
     const userId = String(msg.from?.id ?? "unknown");
 
+    // v0.9.1 commands
     if (text === "/start" || text === "/menu") {
-      const r = renderMainMenu();
-      await this.send(chatId, r.text, r.replyMarkup);
+      const convMem = getConversationMemory(this.env);
+      const state = await convMem.load(userId);
+      const r = renderMainMenuV09(state.state.activeMode);
+      await this.send(chatId, r.text, r.replyMarkup, "Markdown");
+      return;
+    }
+
+    if (text === "/plan") {
+      await this.switchMode(chatId, userId, "plan");
+      return;
+    }
+
+    if (text === "/build") {
+      await this.switchMode(chatId, userId, "build");
+      return;
+    }
+
+    if (text === "/explore") {
+      await this.switchMode(chatId, userId, "explore");
+      return;
+    }
+
+    if (text === "/repositories" || text === "/repos") {
+      await this.showRepositories(chatId, userId);
+      return;
+    }
+
+    if (text === "/health") {
+      await this.showHealth(chatId);
+      return;
+    }
+
+    if (text === "/memory") {
+      const convMem = getConversationMemory(this.env);
+      const snapshot = await convMem.getSnapshot(userId);
+      const memText = [
+        `🧠 *Memory Snapshot*`,
+        ``,
+        `*Active project:* \`${snapshot.activeProject ?? "(none)"}\``,
+        `*Active repository:* \`${snapshot.activeRepository ?? "(none)"}\``,
+        `*Active workflow:* \`${snapshot.activeWorkflow ?? "(none)"}\``,
+        `*Active mode:* ${snapshot.activeMode}`,
+        `*Recent approvals:* ${snapshot.recentApprovalsCount}`,
+        `*Last interaction:* ${new Date(snapshot.lastInteractionAt).toLocaleString()}`,
+      ].join("\n");
+      await this.send(chatId, memText, undefined, "Markdown");
+      return;
+    }
+
+    if (text === "/reset") {
+      const convMem = getConversationMemory(this.env);
+      await convMem.reset(userId);
+      await this.send(chatId, `🧹 Conversation memory reset. Mode is now *Plan*.`, undefined, "Markdown");
       return;
     }
 
@@ -98,6 +156,52 @@ export class TelegramController {
     }
 
     await this.startWorkflowFromText(chatId, userId, text);
+  }
+
+  // ============================================
+  // v0.9.1: Mode switching with conversation memory
+  // ============================================
+
+  private async switchMode(chatId: number, userId: string, mode: "plan" | "build" | "explore"): Promise<void> {
+    const modeManager = getModeManager(this.env);
+    const convMem = getConversationMemory(this.env);
+
+    const result = modeManager.setMode(userId, mode);
+    if (!result.ok) {
+      await this.send(chatId, `❌ ${result.reason}`, undefined, "Markdown");
+      return;
+    }
+    await convMem.setMode(userId, mode);
+
+    const labels = { plan: "🧠 Plan", build: "⚔️ Build", explore: "🔍 Explore" };
+    await this.send(
+      chatId,
+      `${labels[mode]} mode activated.\n\nManager behavior switched to *${mode}* role.`,
+      undefined,
+      "Markdown",
+    );
+  }
+
+  // ============================================
+  // v0.9.1: /repositories command
+  // ============================================
+
+  private async showRepositories(chatId: number, userId: string): Promise<void> {
+    const repoManager = getRepositoryManager(this.env);
+    const repos = await repoManager.listForUser(userId);
+    const { text, replyMarkup } = repoManager.renderList(repos);
+    await this.send(chatId, text, replyMarkup, "Markdown");
+  }
+
+  // ============================================
+  // v0.9.1: /health command
+  // ============================================
+
+  private async showHealth(chatId: number): Promise<void> {
+    await this.send(chatId, `🩺 Running health check…`);
+    const report = await runHealthCheck(this.env);
+    const text = renderHealthReport(report);
+    await this.send(chatId, text, undefined, "Markdown");
   }
 
   // ============================================
