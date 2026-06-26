@@ -63,7 +63,7 @@ export interface DriftReport {
 export const EXPECTED_LOCAL_VARS: Record<string, string> = {
   NODE_ENV: "production",
   LOG_LEVEL: "info",
-  HADES_VERSION: "9.3",
+  HADES_VERSION: "9.4",
 };
 
 /**

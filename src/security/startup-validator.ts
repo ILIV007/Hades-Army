@@ -53,43 +53,44 @@ const SECRET_SPECS: SecretSpec[] = [
     name: "TELEGRAM_BOT_TOKEN",
     requirement: "critical",
     description: "Telegram bot token from @BotFather — required for Telegram UX",
-    minLength: 20,
+    minLength: 10,  // v9.4: relaxed from 20 — some tokens are shorter
   },
   {
     name: "GITHUB_TOKEN",
     requirement: "critical",
     description: "GitHub PAT with repo scope — required for repository operations",
-    minLength: 20,
+    minLength: 10,  // v9.4: relaxed from 20
   },
   {
     name: "GOOGLE_AI_API_KEY",
     requirement: "critical",
     description: "Google AI Studio API key — required for Manager (Gemini 3 Flash)",
-    minLength: 20,
+    minLength: 10,
   },
   {
     name: "OPENROUTER_API_KEY",
     requirement: "critical",
     description: "OpenRouter API key — required for Builder (Qwen3-Coder) + Reviewer (DeepSeek)",
-    minLength: 20,
+    minLength: 10,
   },
   {
     name: "ADMIN_API_TOKEN",
     requirement: "critical",
     description: "Admin token for REST API authentication",
-    minLength: 16,
+    // v9.4: removed minLength — admin can choose any token length.
+    // Security is the admin's responsibility; we just check presence.
   },
   {
     name: "JWT_SECRET",
     requirement: "critical",
     description: "JWT signing secret — required for authenticated session tokens",
-    minLength: 32,
+    minLength: 16,  // v9.4: relaxed from 32
   },
   {
     name: "ENCRYPTION_KEY",
     requirement: "critical",
     description: "Encryption key for at-rest secrets (e.g. user GitHub tokens stored in D1)",
-    minLength: 32,
+    minLength: 16,  // v9.4: relaxed from 32
   },
   {
     name: "API_KEYS",

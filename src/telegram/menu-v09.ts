@@ -67,13 +67,13 @@ export const MAIN_MENU_BUTTONS_V09: MenuButtonV09[] = [
 // Renderers
 // ============================================
 
-export function renderMainMenuV09(activeMode: OperationMode = "plan"): {
+export function renderMainMenuV09(activeMode: OperationMode = "plan", version: string = "unknown"): {
   text: string;
   replyMarkup: TelegramInlineKeyboard;
 } {
   const mode = MODES[activeMode];
   const text = [
-    `🏛 *Hades Army* v0.9`,
+    `🏛 *Hades Army* v${version}`,
     ``,
     `Autonomous Repository-Aware Development Team`,
     ``,

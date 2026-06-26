@@ -31,6 +31,7 @@ export interface HomeScreenContext {
   runningTasks: number;
   pendingApprovals: number;
   lastActivity?: string;
+  version?: string; // v9.4 — dynamic version from env
 }
 
 // ============================================
@@ -42,8 +43,9 @@ export function renderHomeScreen(ctx: HomeScreenContext): {
   replyMarkup: { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> };
 } {
   const mode = EXTENDED_MODES[ctx.activeMode];
+  const version = ctx.version ?? "unknown";
   const lines: string[] = [
-    `🏛 *Hades Army* v9.3`,
+    `🏛 *Hades Army* v${version}`,
     ``,
     `*Mode:* ${mode.emoji} ${mode.label}`,
   ];

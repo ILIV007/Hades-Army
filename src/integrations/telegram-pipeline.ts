@@ -25,11 +25,9 @@ import { generateId } from "../utils/helpers";
 import type { HadesBindings } from "../types";
 import { getTelegramService, recordTelegramEvent } from "../integrations/telegram-service";
 import { getConversationMemory } from "../memory/conversation-memory";
-import { getModeManager, MODES } from "../modes/operation-modes";
-import { renderMainMenuV09 } from "../telegram/menu-v09";
+import { getModeManager } from "../modes/operation-modes";
 import { renderHealthReport, runHealthCheck } from "../monitoring/health-dashboard";
 import { getRepositoryManager } from "../github/repository-manager";
-import { getControlledCrashValidator } from "../security/controlled-crash-validator";
 
 // ============================================
 // Types
@@ -61,6 +59,34 @@ export interface TelegramUpdate {
 }
 
 // ============================================
+// Update ID deduplication (prevents duplicate messages)
+// ============================================
+//
+// Telegram retries updates if the webhook returns non-200. Even with
+// 200 responses, multiple isolates can process the same update_id
+// concurrently. We track the last N update_ids per-isolate and skip
+// duplicates. This is the SINGLE most effective fix for duplicate
+// messages.
+
+const MAX_DEDUP_IDS = 200;
+const recentUpdateIds = new Set<number>();
+const recentUpdateIdsArray: number[] = [];
+
+function isDuplicateUpdate(updateId: number): boolean {
+  if (recentUpdateIds.has(updateId)) {
+    logger.warn("[TG Dedup] Duplicate update_id detected — skipping", { updateId });
+    return true;
+  }
+  recentUpdateIds.add(updateId);
+  recentUpdateIdsArray.push(updateId);
+  if (recentUpdateIdsArray.length > MAX_DEDUP_IDS) {
+    const oldest = recentUpdateIdsArray.shift();
+    if (oldest !== undefined) recentUpdateIds.delete(oldest);
+  }
+  return false;
+}
+
+// ============================================
 // Pipeline orchestrator
 // ============================================
 
@@ -76,8 +102,16 @@ export class TelegramPipeline {
   /**
    * Process a Telegram update. NEVER throws — always returns 200 OK
    * so Telegram doesn't retry the same failing update forever.
+   *
+   * CRITICAL (v9.4): Deduplicates by update_id BEFORE any processing
+   * to prevent duplicate messages.
    */
   async processUpdate(update: TelegramUpdate): Promise<{ ok: boolean; traceId: string }> {
+    // === STEP 0: Deduplicate by update_id ===
+    if (update.update_id !== undefined && isDuplicateUpdate(update.update_id)) {
+      return { ok: true, traceId: this.traceId }; // silently skip — already processed
+    }
+
     recordTelegramEvent({
       kind: "update_received",
       chatId: update.message?.chat.id ?? update.callback_query?.message?.chat.id,
@@ -153,6 +187,7 @@ export class TelegramPipeline {
       let activeMode: "plan" | "build" | "explore" = "plan";
       let activeProject: string | undefined;
       let activeRepo: string | undefined;
+      let activeWorkflow: string | undefined;
 
       try {
         const convMem = getConversationMemory(this.env);
@@ -161,6 +196,9 @@ export class TelegramPipeline {
         activeMode = (snapshot.activeMode ?? "plan") as typeof activeMode;
         activeProject = snapshot.activeProject;
         activeRepo = snapshot.activeRepository;
+        // v9.4 — load wizard/workflow state
+        const state = await convMem.load(userId);
+        activeWorkflow = state.state.activeWorkflow;
       } catch (memErr) {
         // CRITICAL FIX #8: memory failures are NON-FATAL
         logger.warn("[TG] Conversation memory load failed — continuing with defaults", {
@@ -184,6 +222,27 @@ export class TelegramPipeline {
       }
       if (text === "/explore") {
         await this.switchMode(chatId, userId, "explore");
+        return;
+      }
+      // v9.3 — extended modes
+      if (text === "/analyze") {
+        await this.switchMode(chatId, userId, "analyze");
+        return;
+      }
+      if (text === "/review") {
+        await this.switchMode(chatId, userId, "review");
+        return;
+      }
+      if (text === "/debug") {
+        await this.switchMode(chatId, userId, "debug");
+        return;
+      }
+      if (text === "/architect") {
+        await this.switchMode(chatId, userId, "architect");
+        return;
+      }
+      if (text === "/chat") {
+        await this.switchMode(chatId, userId, "chat");
         return;
       }
 
@@ -224,6 +283,12 @@ export class TelegramPipeline {
           ].join("\n"),
           { parseMode: "Markdown" },
         );
+        return;
+      }
+
+      // v9.4 — Repository Wizard: if user is in wizard mode, treat free-text as repo URL
+      if (activeWorkflow === "wizard:connect_repo") {
+        await this.handleRepositoryConnect(chatId, userId, text);
         return;
       }
 
@@ -292,13 +357,25 @@ export class TelegramPipeline {
       }
 
       if (data === "menu:connect_repository") {
+        // v9.4 — set wizard state so the next free-text message is treated as repo URL
+        try {
+          const convMem = getConversationMemory(this.env);
+          await convMem.setActiveWorkflow(userId, "wizard:connect_repo");
+        } catch {
+          // non-fatal
+        }
         await service.sendMessage(
           chatId,
           [
             `🔗 *Connect Repository*`,
             ``,
-            `Send me the repository URL or \`owner/name\` to begin the wizard.`,
-            `Example: \`https://github.com/owner/repo\` or \`owner/repo\``,
+            `Send me the repository URL or \`owner/name\` to connect.`,
+            ``,
+            `Examples:`,
+            `• \`https://github.com/owner/repo\``,
+            `• \`owner/repo\``,
+            ``,
+            `_I'll validate the token, scan the repo, and create a project._`,
           ].join("\n"),
           { parseMode: "Markdown" },
         );
@@ -341,75 +418,78 @@ export class TelegramPipeline {
     activeMode: "plan" | "build" | "explore",
     activeRepo: string | undefined,
   ): Promise<void> {
-    const r = renderMainMenuV09(activeMode);
     const service = getTelegramService(this.env);
     if (!service) return;
 
-    const text = activeRepo
-      ? r.text
-      : [
-          `🏛 *Hades Army* v0.9.2`,
-          ``,
-          `Autonomous Repository-Aware Development Team`,
-          ``,
-          `*Active mode:* ${MODES[activeMode].emoji} ${MODES[activeMode].label}`,
-          `*Repository:* none connected`,
-          ``,
-          `_Connect a repository to get started._`,
-        ].join("\n");
+    const version = this.env.HADES_VERSION ?? "unknown";
 
-    const replyMarkup = activeRepo
-      ? r.replyMarkup
-      : {
-          inline_keyboard: [
-            [
-              { text: "🔗 Connect Repository", callback_data: "menu:connect_repository" },
-              { text: "📦 My Repositories", callback_data: "menu:my_repositories" },
-            ],
-            [{ text: "📊 Status", callback_data: "menu:status" }],
-            [{ text: "⚙️ Settings", callback_data: "menu:settings" }],
-          ],
-        };
-
-    recordTelegramEvent({ kind: "sending", chatId, userId: Number(userId), responsePreview: text.slice(0, 80) });
-    const result = await service.sendMessage(chatId, text, {
-      parseMode: "Markdown",
-      replyMarkup,
-    });
-    recordTelegramEvent({
-      kind: result.ok ? "sent" : "failed",
-      chatId,
-      userId: Number(userId),
-      error: result.error,
-    });
+    // v9.4 — use new home screen
+    try {
+      const { renderHomeScreen } = await import("../telegram/home-screen");
+      const { EXTENDED_MODES } = await import("../modes/extended-modes");
+      const home = renderHomeScreen({
+        userId,
+        activeMode: activeMode as any,
+        activeRepository: activeRepo,
+        runningTasks: 0,
+        pendingApprovals: 0,
+        version,
+      });
+      recordTelegramEvent({ kind: "sending", chatId, userId: Number(userId), responsePreview: home.text.slice(0, 80) });
+      const result = await service.sendMessage(chatId, home.text, {
+        parseMode: "Markdown",
+        replyMarkup: home.replyMarkup,
+      });
+      recordTelegramEvent({
+        kind: result.ok ? "sent" : "failed",
+        chatId,
+        userId: Number(userId),
+        error: result.error,
+      });
+    } catch (err) {
+      // Fallback to simple menu if home-screen fails
+      logger.warn("[TG] Home screen render failed, using fallback", { err });
+      const text = `🏛 *Hades Army* v${version}\n\n*Repository:* ${activeRepo ?? "none connected"}\n\nUse /plan /build /explore /repositories /health`;
+      await service.sendMessage(chatId, text, { parseMode: "Markdown" });
+    }
   }
 
-  private async switchMode(chatId: number, userId: string, mode: "plan" | "build" | "explore"): Promise<void> {
+  private async switchMode(chatId: number, userId: string, mode: string): Promise<void> {
     const service = getTelegramService(this.env);
     if (!service) return;
 
     try {
-      const modeManager = getModeManager(this.env);
-      const result = modeManager.setMode(userId, mode);
-      if (!result.ok) {
-        await service.sendMessage(chatId, `❌ ${result.reason}`, { parseMode: "Markdown" });
+      // v9.4 — use extended modes for the labels/roles
+      const { EXTENDED_MODES, isValidExtendedMode } = await import("../modes/extended-modes");
+      if (!isValidExtendedMode(mode)) {
+        await service.sendMessage(chatId, `❌ Unknown mode: ${mode}`, { parseMode: "Markdown" });
         return;
+      }
+      const modeDesc = EXTENDED_MODES[mode as keyof typeof EXTENDED_MODES];
+
+      // Set in mode manager (only for plan/build/explore — others are just labels)
+      if (mode === "plan" || mode === "build" || mode === "explore") {
+        const modeManager = getModeManager(this.env);
+        const result = modeManager.setMode(userId, mode as "plan" | "build" | "explore");
+        if (!result.ok) {
+          await service.sendMessage(chatId, `❌ ${result.reason}`, { parseMode: "Markdown" });
+          return;
+        }
       }
       try {
         const convMem = getConversationMemory(this.env);
-        await convMem.setMode(userId, mode);
+        await convMem.setMode(userId, mode as any);
       } catch {
         // non-fatal
       }
-      const labels = { plan: "🧠 Plan", build: "⚔️ Build", explore: "🔍 Explore" };
       await service.sendMessage(
         chatId,
         [
-          `${labels[mode]} mode activated.`,
+          `${modeDesc.emoji} *${modeDesc.label}* mode activated.`,
           ``,
-          `*Current Mode: ${mode.toUpperCase()}*`,
+          `_${modeDesc.tagline}_`,
           ``,
-          `Manager behavior switched to *${MODES[mode].managerRole}* role.`,
+          `Manager behavior: *${modeDesc.managerRole}*`,
         ].join("\n"),
         { parseMode: "Markdown" },
       );
@@ -463,6 +543,148 @@ export class TelegramPipeline {
       await service.sendMessage(chatId, text, { parseMode: "Markdown" });
     } catch (err) {
       await service.sendMessage(chatId, `⚠️ Memory snapshot failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // ============================================
+  // v9.4 — Repository Connection Handler
+  // ============================================
+
+  private async handleRepositoryConnect(chatId: number, userId: string, input: string): Promise<void> {
+    const service = getTelegramService(this.env);
+    if (!service) return;
+
+    // Clear wizard state immediately
+    try {
+      const convMem = getConversationMemory(this.env);
+      await convMem.clearWorkflow(userId);
+    } catch {
+      // non-fatal
+    }
+
+    // Parse repo URL
+    const trimmed = input.trim();
+    let repoFullName: string | undefined;
+    const shortMatch = trimmed.match(/^([\w.-]+)\/([\w.-]+)$/);
+    if (shortMatch) {
+      repoFullName = `${shortMatch[1]}/${shortMatch[2].replace(/\.git$/, "")}`;
+    } else {
+      const urlMatch = trimmed.match(/^https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)/i);
+      if (urlMatch) {
+        repoFullName = `${urlMatch[1]}/${urlMatch[2].replace(/\.git$/, "")}`;
+      }
+    }
+
+    if (!repoFullName) {
+      await service.sendMessage(
+        chatId,
+        [
+          `❌ *Invalid repository URL*`,
+          ``,
+          `Could not parse: \`${trimmed}\``,
+          ``,
+          `Accepted formats:`,
+          `• \`https://github.com/owner/repo\``,
+          `• \`owner/repo\``,
+          ``,
+          `Try again with /menu → Connect Repository.`,
+        ].join("\n"),
+        { parseMode: "Markdown" },
+      );
+      return;
+    }
+
+    // Send "analyzing" message
+    await service.sendMessage(
+      chatId,
+      [
+        `🔗 *Connecting repository...*`,
+        ``,
+        `Repository: \`${repoFullName}\``,
+        ``,
+        `⏳ Validating access...`,
+      ].join("\n"),
+      { parseMode: "Markdown" },
+    );
+
+    try {
+      const repoManager = getRepositoryManager(this.env);
+
+      // Fetch summary from GitHub
+      const summary = await repoManager.fetchSummary(repoFullName);
+      if (!summary) {
+        await service.sendMessage(
+          chatId,
+          [
+            `❌ *Repository access failed*`,
+            ``,
+            `Could not access \`${repoFullName}\`.`,
+            `Make sure GITHUB_TOKEN is set and has access to this repository.`,
+          ].join("\n"),
+          { parseMode: "Markdown" },
+        );
+        return;
+      }
+
+      // Connect the repository
+      const connected = await repoManager.connect(userId, {
+        repositoryFullName: summary.repositoryFullName,
+        displayName: summary.displayName,
+        visibility: summary.visibility,
+        defaultBranch: summary.defaultBranch,
+        language: summary.language,
+        size: summary.size,
+      });
+
+      // Set as active in conversation memory
+      const convMem = getConversationMemory(this.env);
+      await convMem.setActiveRepository(userId, summary.repositoryFullName);
+      const projectId = `proj_${Date.now()}`;
+      await convMem.setActiveProject(userId, projectId);
+
+      // Send summary
+      const vis = summary.visibility === "private" ? "🔒 Private" : "🌐 Public";
+      await service.sendMessage(
+        chatId,
+        [
+          `✅ *Repository Connected!*`,
+          ``,
+          `*Name:* ${summary.displayName}`,
+          `*Full name:* \`${summary.repositoryFullName}\``,
+          `*Visibility:* ${vis}`,
+          `*Language:* ${summary.language}`,
+          `*Default branch:* \`${summary.defaultBranch}\``,
+          `*Size:* ${Math.round(summary.size)} KB`,
+          `*Branches:* ${summary.branchesCount}`,
+          `*Stars:* ${summary.starsCount}`,
+          ``,
+          `*Project ID:* \`${projectId}\``,
+          ``,
+          `🎉 You can now use /plan to start planning, or /build to execute.`,
+        ].join("\n"),
+        {
+          parseMode: "Markdown",
+          replyMarkup: {
+            inline_keyboard: [
+              [
+                { text: "🧠 Plan", callback_data: "menu:plan" },
+                { text: "⚒ Build", callback_data: "menu:build" },
+              ],
+              [{ text: "🏠 Home", callback_data: "menu:main" }],
+            ],
+          },
+        },
+      );
+    } catch (err) {
+      await service.sendMessage(
+        chatId,
+        [
+          `❌ *Connection failed*`,
+          ``,
+          `Error: ${err instanceof Error ? err.message : String(err)}`,
+        ].join("\n"),
+        { parseMode: "Markdown" },
+      );
     }
   }
 
