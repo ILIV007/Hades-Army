@@ -14,7 +14,8 @@ import type { HadesBindings } from "../types";
 // ============================================
 
 export function renderAdminDashboard(env: HadesBindings): string {
-  const version = env.HADES_VERSION ?? "unknown";
+  // Defensive: never throw if env is partial
+  const version = (env && env.HADES_VERSION) ? env.HADES_VERSION : "unknown";
   return `<!DOCTYPE html>
 <html lang="en" data-theme="dark">
 <head>

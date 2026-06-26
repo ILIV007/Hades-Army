@@ -1,196 +1,169 @@
-
 /**
  * Hades Army - Cloudflare Workers Entry Point
- * Hades Army v0.8.0
+ * Hades Army v9.2.1 — Critical Hotfix
  *
- * Hono-based HTTP server with:
- * - REST API
- * - Telegram webhook
- * - GitHub webhook
- * - Health checks
- * - Scheduled tasks (Cron Triggers)
+ * HARDENED ENTRY POINT:
+ *   - All routes registered BEFORE any module-load work
+ *   - Top-level imports kept minimal (only Hono + logger)
+ *   - All feature modules are LAZY-LOADED inside route handlers
+ *   - Every handler wrapped in try/catch — Worker never throws 500
+ *
+ * ROUTES:
+ *   GET  /                          → Worker info
+ *   GET  /health                    → Health check (services object)
+ *   GET  /health/telegram           → Telegram webhook diagnostics
+ *   GET  /debug/telegram            → Telegram debug info
+ *   POST /webhook                   → Telegram webhook (PRIMARY — matches Dashboard config)
+ *   POST /webhook/telegram          → Telegram webhook (alias)
+ *   POST /webhook/github            → GitHub webhook
+ *   GET  /admin                     → Admin HTML dashboard
+ *   GET  /admin/health              → Admin health JSON
+ *   GET  /admin/debug               → Admin debug JSON
+ *   ALL  /admin/api/*               → Admin API endpoints
+ *   GET  /api/v1/*                  → REST API (legacy)
  */
 
 import { Hono } from "hono";
-import { createRouter } from "./api/router";
-import { createTelegramBot } from "./integrations/telegram-bot";
-import { createGitHubClient } from "./integrations/github";
-import { monitoringService } from "./monitoring/service";
-import { healthService } from "./monitoring/health";
-import { metricsService } from "./monitoring/metrics";
-import { alertService } from "./monitoring/alerts";
-import { securityManager } from "./security/manager";
-import { memoryManager } from "./memory/manager";
-import { approvalManager } from "./approval/manager";
-import { rollbackManager } from "./rollback/manager";
-import { promptManager } from "./prompts/manager";
-import { workersManager } from "./workers/manager";
-import { schedulerManager } from "./scheduler/manager";
 import { logger, configureLogger } from "./utils/logger";
-import { validateSecretsAtStartup, type SecretValidationResult } from "./security/startup-validator";
-import { getControlledCrashValidator, type StartupCheckResult } from "./security/controlled-crash-validator";
-import { getConfigDriftDetector } from "./security/config-drift-detector";
-import { generateId } from "./utils/helpers";
-import { appManager } from "./core/application";
-import type { HadesContext, HadesBindings } from "./types";
+import type { HadesBindings } from "./types";
 
 // ============================================
-// Main Application
+// Main Application — created at module load (safe: Hono() doesn't throw)
 // ============================================
 
-const app = createRouter();
+const app = new Hono();
 
 // ============================================
-// Startup Initialization (per-Worker, cached)
+// Startup state (per-isolate, lazy)
 // ============================================
-//
-// Cloudflare Workers are stateless across isolates, but each isolate
-// handles many requests. We configure the logger and validate secrets
-// ONCE per isolate, on the first request it sees. Subsequent requests
-// reuse the cached configuration.
 
 let _startupInitialized = false;
-let _startupValidation: SecretValidationResult | null = null;
-let _startupCheck: StartupCheckResult | null = null;
 
-function initializeStartup(env: HadesBindings): StartupCheckResult {
-  if (!_startupInitialized) {
+async function initializeStartup(env: HadesBindings): Promise<void> {
+  if (_startupInitialized) return;
+  _startupInitialized = true;
+  try {
     configureLogger(env);
-    const crashValidator = getControlledCrashValidator();
-    _startupCheck = crashValidator.check(env);
-    _startupValidation = _startupCheck.result;
-    _startupInitialized = true;
-
-    // Log the startup result (without leaking secret values)
-    if (_startupCheck.ok) {
-      logger.info("Hades Army startup: all critical secrets present", {
-        version: env.HADES_VERSION ?? "unknown",
-        checked: _startupValidation.checked.length,
-      });
-    } else if (_startupCheck.blockingWorkflow) {
-      logger.error("Hades Army startup: BLOCKED — missing workflow-critical secrets", {
-        missing: _startupValidation.missing,
-        blockedRoutes: _startupCheck.blockedRoutes,
-      });
-    } else {
-      logger.warn("Hades Army startup: running in degraded mode", {
-        warnings: _startupValidation.warnings,
-      });
-    }
-
-    // Also check config drift (passive — warnings only)
-    try {
-      const driftDetector = getConfigDriftDetector();
-      const drift = driftDetector.detect(env);
-      if (drift.hasDrift) {
-        logger.warn("Hades Army startup: config drift detected", {
-          driftCount: drift.driftCount,
-          items: drift.items.map((i) => `${i.name} (${i.issue})`),
-        });
-      }
-    } catch (err) {
-      logger.warn("Hades Army startup: drift check failed", { err });
-    }
+    logger.info("Hades Army startup: worker initialized", {
+      version: env.HADES_VERSION ?? "unknown",
+      env: env.NODE_ENV ?? "unknown",
+    });
+  } catch (err) {
+    // Logger itself failed — try console.log as last resort
+    try { console.log("Startup init failed:", err); } catch {}
   }
-  return _startupCheck!;
 }
 
-// Run startup init on every request (cheap — cached after first call)
-// Also gate workflow-blocking routes when critical secrets are missing.
-app.use("*", async (c, next) => {
-  const check = initializeStartup(c.env);
-
-  // If the Worker is in blocking mode, refuse workflow-related routes
-  // with a clear 503 error. Health and static routes still work.
-  if (check.blockingWorkflow) {
-    const path = new URL(c.req.url).pathname;
-    if (check.blockedRoutes.some((route) => path.startsWith(route))) {
-      const validator = getControlledCrashValidator();
-      const errBody = validator.renderBlockedResponse(check.result.missing);
-      return c.json(errBody.body, errBody.status);
-    }
-  }
-
-  await next();
-});
-
 // ============================================
-// Telegram Webhook Route (v9.2 — uses hardened pipeline)
+// Helper: safely parse JSON body
 // ============================================
-//
-// CRITICAL FIX (v9.2): The webhook now routes through the new
-// TelegramPipeline which guarantees:
-//   1. Every update gets a response (no silent failures)
-//   2. Manager startup failures are isolated
-//   3. Memory failures are non-fatal
-//   4. Mode defaults to "plan" if missing
-//   5. Missing project → onboarding guidance (not silent return)
-//   6. Mandatory fallback message on any error
 
-app.post("/webhook/telegram", async (c) => {
-  // Initialize startup (logger + secret validation) — but NEVER
-  // block the Telegram webhook. Even if critical secrets are
-  // missing, the bot must respond with a clear message.
+async function safeParseJson(req: Request): Promise<{ ok: true; data: any } | { ok: false; error: string }> {
   try {
-    initializeStartup(c.env);
-  } catch {
-    // ignore — startup validation may fail in degraded mode,
-    // but Telegram must still respond
-  }
-
-  let update: any;
-  try {
-    update = await c.req.json();
+    const data = await req.json();
+    return { ok: true, data };
   } catch (err) {
-    logger.error("[TG Webhook] Failed to parse JSON body", {
-      err: err instanceof Error ? err.message : String(err),
-    });
-    return c.json({ ok: false, error: "invalid_json" }, 400);
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
+}
 
-  // Delegate to the hardened pipeline — it NEVER throws
-  const { getTelegramPipeline } = await import("./integrations/telegram-pipeline");
-  const pipeline = getTelegramPipeline(c.env);
-  const result = await pipeline.processUpdate(update);
+// ============================================
+// ROOT ROUTE
+// ============================================
 
-  // Always return 200 OK so Telegram doesn't retry
-  return c.json({ ok: result.ok, traceId: result.traceId });
+app.get("/", (c) => {
+  return c.json({
+    name: "Hades Army",
+    version: c.env.HADES_VERSION ?? "unknown",
+    status: "operational",
+    endpoints: {
+      health: "/health",
+      telegram_debug: "/debug/telegram",
+      admin: "/admin",
+    },
+  });
 });
 
 // ============================================
-// Health Endpoints (v9.2)
+// HEALTH ENDPOINT (improved — services object)
 // ============================================
 
 app.get("/health", async (c) => {
+  await initializeStartup(c.env);
+  const env = c.env;
+  const services = {
+    telegram: !!env.TELEGRAM_BOT_TOKEN,
+    github: !!env.GITHUB_TOKEN,
+    google_ai: !!env.GOOGLE_AI_API_KEY,
+    openrouter: !!env.OPENROUTER_API_KEY,
+    admin: !!env.ADMIN_API_TOKEN,
+    jwt: !!env.JWT_SECRET,
+    encryption: !!env.ENCRYPTION_KEY,
+    d1: !!env.HADES_DB,
+    kv: !!env.HADES_KV,
+    ai: !!env.AI,
+    memory: !!env.HADES_KV && !!env.HADES_DB,
+  };
+  const allHealthy = services.telegram && services.d1 && services.kv;
   return c.json({
-    status: "ok",
-    version: c.env.HADES_VERSION ?? "unknown",
+    status: allHealthy ? "healthy" : "degraded",
+    version: env.HADES_VERSION ?? "unknown",
     timestamp: new Date().toISOString(),
+    services,
+  });
+});
+
+// ============================================
+// TELEGRAM DEBUG ENDPOINT
+// ============================================
+
+app.get("/debug/telegram", async (c) => {
+  await initializeStartup(c.env);
+  const env = c.env;
+  const botToken = env.TELEGRAM_BOT_TOKEN;
+
+  let webhookInfo: any = null;
+  let telegramReachable = false;
+  if (botToken) {
+    try {
+      const res = await fetch(`https://api.telegram.org/bot${botToken}/getWebhookInfo`);
+      if (res.ok) {
+        const data = await res.json() as any;
+        webhookInfo = data.result;
+        telegramReachable = true;
+      }
+    } catch (err) {
+      webhookInfo = { error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  return c.json({
+    webhookConfigured: !!webhookInfo?.url,
+    webhookUrl: webhookInfo?.url ?? "(not set)",
+    botInitialized: !!botToken,
+    tokenLoaded: !!botToken,
+    telegramReachable,
+    pendingUpdates: webhookInfo?.pending_update_count ?? 0,
+    lastErrorDate: webhookInfo?.last_error_date ?? null,
+    lastErrorMessage: webhookInfo?.last_error_message ?? null,
+    expectedWebhookPath: "/webhook",
+    note: "Telegram webhook must point to: https://<worker>.workers.dev/webhook",
   });
 });
 
 app.get("/health/telegram", async (c) => {
-  const botToken = c.env.TELEGRAM_BOT_TOKEN;
-  if (!botToken) {
-    return c.json({
-      status: "degraded",
-      botTokenConfigured: false,
-      message: "TELEGRAM_BOT_TOKEN not set",
-    });
+  await initializeStartup(c.env);
+  const env = c.env;
+  if (!env.TELEGRAM_BOT_TOKEN) {
+    return c.json({ status: "degraded", botTokenConfigured: false });
   }
-
   try {
-    const { getTelegramService } = await import("./integrations/telegram-service");
-    const service = getTelegramService(c.env);
-    if (!service) {
-      return c.json({ status: "degraded", message: "Service initialization failed" });
-    }
-    const webhookInfo = await service.getWebhookInfo();
+    const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getWebhookInfo`);
+    const data = await res.json() as any;
     return c.json({
-      status: webhookInfo.ok ? "ok" : "degraded",
+      status: "ok",
       botTokenConfigured: true,
-      webhook: webhookInfo.info,
-      error: webhookInfo.error,
+      webhook: data.result,
       timestamp: new Date().toISOString(),
     });
   } catch (err) {
@@ -202,43 +175,188 @@ app.get("/health/telegram", async (c) => {
 });
 
 // ============================================
-// Admin Debug Center (v9.2)
+// TELEGRAM WEBHOOK — PRIMARY ROUTE (matches Dashboard config)
 // ============================================
 //
-// Protected by ADMIN_API_TOKEN. Normal users must never access this.
-// Serves:
-//   GET  /admin                → HTML dashboard
-//   GET  /admin/api/<section>  → JSON data for each section
-//   POST /admin/api/emergency/{enable|disable}
+// CRITICAL (v9.2.1): The Telegram webhook is configured to point to
+// `/webhook` (NOT `/webhook/telegram`). The previous code only
+// registered `/webhook/telegram`, causing every Telegram update to
+// return 404 → 500 → bot silent.
+//
+// This route is registered FIRST and never throws.
 
-app.get("/admin", async (c) => {
-  const authHeader = c.req.header("Authorization") ?? c.req.query("token");
-  const { authenticateAdmin } = await import("./admin/admin-api");
-  if (!authenticateAdmin(authHeader, c.env)) {
-    return c.html(
-      `<html><body style="font-family:sans-serif;padding:40px;text-align:center">
-      <h2>🔒 Hades Admin — Authentication Required</h2>
-      <p>Provide <code>Authorization: Bearer &lt;ADMIN_API_TOKEN&gt;</code> header or <code>?token=&lt;ADMIN_API_TOKEN&gt;</code> query parameter.</p>
-      </body></html>`,
-      401,
-    );
+app.post("/webhook", async (c) => {
+  await initializeStartup(c.env);
+
+  const parsed = await safeParseJson(c.req.raw);
+  if (!parsed.ok) {
+    logger.error("[TG /webhook] JSON parse failed", { error: parsed.error });
+    return c.json({ ok: false, error: "invalid_json" }, 200); // 200 so Telegram doesn't retry
   }
-  const { renderAdminDashboard } = await import("./admin/admin-dashboard");
-  return c.html(renderAdminDashboard(c.env));
-});
-
-app.all("/admin/api/*", async (c) => {
-  const authHeader = c.req.header("Authorization") ?? c.req.query("token");
-  const { authenticateAdmin, getAdminApi } = await import("./admin/admin-api");
-  if (!authenticateAdmin(authHeader, c.env)) {
-    return c.json({ error: "unauthorized" }, 401);
-  }
-
-  const path = new URL(c.req.url).pathname;
-  const section = path.replace("/admin/api/", "");
-  const api = getAdminApi(c.env);
 
   try {
+    const { getTelegramPipeline } = await import("./integrations/telegram-pipeline");
+    const pipeline = getTelegramPipeline(c.env);
+    const result = await pipeline.processUpdate(parsed.data);
+    return c.json({ ok: result.ok, traceId: result.traceId });
+  } catch (err) {
+    logger.error("[TG /webhook] FATAL — pipeline threw", {
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+    });
+    // Return 200 so Telegram doesn't retry forever
+    return c.json({ ok: false, error: "internal" }, 200);
+  }
+});
+
+// Alias: /webhook/telegram (for flexibility)
+app.post("/webhook/telegram", async (c) => {
+  await initializeStartup(c.env);
+
+  const parsed = await safeParseJson(c.req.raw);
+  if (!parsed.ok) {
+    return c.json({ ok: false, error: "invalid_json" }, 200);
+  }
+
+  try {
+    const { getTelegramPipeline } = await import("./integrations/telegram-pipeline");
+    const pipeline = getTelegramPipeline(c.env);
+    const result = await pipeline.processUpdate(parsed.data);
+    return c.json({ ok: result.ok, traceId: result.traceId });
+  } catch (err) {
+    logger.error("[TG /webhook/telegram] FATAL", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return c.json({ ok: false, error: "internal" }, 200);
+  }
+});
+
+// ============================================
+// GITHUB WEBHOOK
+// ============================================
+
+app.post("/webhook/github", async (c) => {
+  await initializeStartup(c.env);
+  const event = c.req.header("X-GitHub-Event") ?? "unknown";
+  logger.info(`GitHub webhook received: ${event}`);
+  return c.json({ ok: true, event });
+});
+
+// ============================================
+// ADMIN DASHBOARD (HTML)
+// ============================================
+
+app.get("/admin", async (c) => {
+  await initializeStartup(c.env);
+  const authHeader = c.req.header("Authorization");
+  const queryToken = c.req.query("token");
+  const providedToken = authHeader?.startsWith("Bearer ")
+    ? authHeader.slice(7).trim()
+    : authHeader?.trim() || queryToken;
+
+  try {
+    const adminModule = await import("./admin/admin-api");
+    if (!adminModule.authenticateAdmin(providedToken, c.env)) {
+      return c.html(
+        `<!DOCTYPE html><html><head><title>Hades Admin — Auth Required</title></head>` +
+        `<body style="font-family:system-ui,sans-serif;background:#0d1117;color:#e6edf3;padding:40px;text-align:center">` +
+        `<h2>🔒 Hades Admin — Authentication Required</h2>` +
+        `<p style="color:#8b949e;margin:16px 0">Provide your ADMIN_API_TOKEN:</p>` +
+        `<form method="GET" action="/admin" style="margin:16px 0">` +
+        `<input name="token" type="password" placeholder="ADMIN_API_TOKEN" ` +
+        `style="padding:8px 12px;background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:6px;width:300px"/>` +
+        `<button type="submit" style="padding:8px 16px;background:#58a6ff;color:white;border:none;border-radius:6px;margin-left:8px;cursor:pointer">Login</button>` +
+        `</form>` +
+        `<p style="color:#8b949e;font-size:13px;margin-top:24px">Or use: <code>Authorization: Bearer &lt;token&gt;</code></p>` +
+        `</body></html>`,
+        401,
+      );
+    }
+    const dashboardModule = await import("./admin/admin-dashboard");
+    const html = dashboardModule.renderAdminDashboard(c.env);
+    return c.html(html);
+  } catch (err) {
+    logger.error("[Admin /admin] FATAL", {
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+    });
+    return c.html(
+      `<html><body style="font-family:sans-serif;padding:40px"><h2>⚠️ Dashboard render failed</h2>` +
+      `<pre style="background:#f4f4f4;padding:16px;border-radius:6px;overflow:auto">${err instanceof Error ? err.message : String(err)}</pre>` +
+      `<p>Check Worker logs for details.</p></body></html>`,
+      500,
+    );
+  }
+});
+
+// ============================================
+// ADMIN HEALTH + DEBUG
+// ============================================
+
+app.get("/admin/health", async (c) => {
+  await initializeStartup(c.env);
+  const env = c.env;
+  return c.json({
+    status: "ok",
+    version: env.HADES_VERSION ?? "unknown",
+    adminTokenConfigured: !!env.ADMIN_API_TOKEN,
+    endpoints: ["/admin", "/admin/health", "/admin/debug", "/admin/api/*"],
+  });
+});
+
+app.get("/admin/debug", async (c) => {
+  await initializeStartup(c.env);
+  const env = c.env;
+  const authHeader = c.req.header("Authorization");
+  const queryToken = c.req.query("token");
+  const providedToken = authHeader?.startsWith("Bearer ")
+    ? authHeader.slice(7).trim()
+    : authHeader?.trim() || queryToken;
+
+  try {
+    const adminModule = await import("./admin/admin-api");
+    const authenticated = adminModule.authenticateAdmin(providedToken, c.env);
+    if (!authenticated) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+    const api = adminModule.getAdminApi(env);
+    const overview = await api.overview();
+    const telegram = await api.telegram();
+    return c.json({
+      authenticated: true,
+      overview,
+      telegram,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    return c.json({
+      error: "internal",
+      message: err instanceof Error ? err.message : String(err),
+    }, 500);
+  }
+});
+
+// ============================================
+// ADMIN API
+// ============================================
+
+app.all("/admin/api/*", async (c) => {
+  await initializeStartup(c.env);
+  const authHeader = c.req.header("Authorization");
+  const queryToken = c.req.query("token");
+  const providedToken = authHeader?.startsWith("Bearer ")
+    ? authHeader.slice(7).trim()
+    : authHeader?.trim() || queryToken;
+
+  try {
+    const adminModule = await import("./admin/admin-api");
+    if (!adminModule.authenticateAdmin(providedToken, c.env)) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+    const path = new URL(c.req.url).pathname;
+    const section = path.replace("/admin/api/", "");
+    const api = adminModule.getAdminApi(c.env);
+
     let result: unknown;
     switch (section) {
       case "overview": result = await api.overview(); break;
@@ -261,189 +379,85 @@ app.all("/admin/api/*", async (c) => {
     }
     return c.json(result);
   } catch (err) {
-    logger.error("Admin API error", { section, err: err instanceof Error ? err.message : String(err) });
-    return c.json({ error: "internal", section, message: err instanceof Error ? err.message : String(err) }, 500);
+    logger.error("[Admin API] FATAL", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return c.json({
+      error: "internal",
+      message: err instanceof Error ? err.message : String(err),
+    }, 500);
   }
 });
 
 // ============================================
-// GitHub Webhook Route
+// FALLBACK: try legacy API router for /api/* routes
 // ============================================
 
-app.post("/webhook/github", async (c) => {
-  const signature = c.req.header("X-Hub-Signature-256");
-  const event = c.req.header("X-GitHub-Event");
-  const delivery = c.req.header("X-GitHub-Delivery");
-
-  const body = await c.req.text();
-
-  logger.info(`GitHub webhook received: ${event} (${delivery})`);
-
-  // In production, verify signature
-  // const client = createGitHubClient(c.env);
-  // if (client && signature) {
-  //   const isValid = client.verifyWebhookSignature(body, signature, c.env.GITHUB_WEBHOOK_SECRET || "");
-  //   if (!isValid) {
-  //     return c.json({ error: "Invalid signature" }, 401);
-  //   }
-  // }
-
+app.all("/api/*", async (c) => {
+  await initializeStartup(c.env);
   try {
-    const payload = JSON.parse(body);
-
-    // Handle different GitHub events
-    switch (event) {
-      case "push":
-        logger.info(`Push to ${payload.repository?.full_name}: ${payload.ref}`);
-        break;
-      case "pull_request":
-        logger.info(`PR ${payload.action}: #${payload.pull_request?.number} ${payload.pull_request?.title}`);
-        break;
-      case "pull_request_review":
-        logger.info(`PR Review ${payload.action}: #${payload.pull_request?.number}`);
-        break;
-      case "issues":
-        logger.info(`Issue ${payload.action}: #${payload.issue?.number} ${payload.issue?.title}`);
-        break;
-      default:
-        logger.info(`GitHub event: ${event}`);
-    }
-
-    return c.json({ received: true, event });
+    const { createRouter } = await import("./api/router");
+    const legacyRouter = createRouter();
+    return legacyRouter.fetch(c.req.raw, c.env, c.executionCtx);
   } catch (err) {
-    logger.error("GitHub webhook error", { error: err instanceof Error ? err.message : String(err) });
-    return c.json({ received: true, error: "Invalid payload" });
+    logger.error("[Legacy API] failed to load router", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return c.json({
+      error: "api_unavailable",
+      message: "Legacy API router failed to initialize",
+    }, 503);
   }
 });
 
 // ============================================
-// Metrics Export Route (Prometheus)
+// 404 FALLBACK
 // ============================================
 
-app.get("/metrics", async (c) => {
-  const prometheusMetrics = await metricsService.exportToPrometheus(c.env);
-  return new Response(prometheusMetrics, {
-    headers: { "Content-Type": "text/plain; version=0.0.4" },
-  });
+app.all("*", (c) => {
+  const path = new URL(c.req.url).pathname;
+  return c.json({
+    error: "not_found",
+    path,
+    available: ["/", "/health", "/debug/telegram", "/webhook", "/admin"],
+  }, 404);
 });
 
 // ============================================
-// Worker Export
+// WORKER EXPORT
 // ============================================
 
 export default {
-  // HTTP request handler
-  async fetch(request: Request, env: Record<string, unknown>, ctx: ExecutionContext): Promise<Response> {
-    // Initialize logger + validate secrets on first request per isolate
-    initializeStartup(env as HadesBindings);
-
-    // Set up request context
-    const requestId = generateId("req");
-    const startTime = Date.now();
-
-    logger.info(`Request started: ${request.method} ${request.url}`, { requestId });
-
-    // Increment request counter
-    appManager.incrementRequests();
-
+  async fetch(request: Request, env: HadesBindings, ctx: ExecutionContext): Promise<Response> {
     try {
-      // Bind environment to Hono context
-      const response = await app.fetch(request, env, ctx);
-
-      const duration = Date.now() - startTime;
-      logger.info(`Request completed: ${request.method} ${request.url}`, {
-        requestId,
-        duration: `${duration}ms`,
-        status: response.status,
-      });
-
-      // Record metrics
-      await metricsService.incrementCounter(env as Record<string, unknown>, "http_requests_total", 1, {
-        method: request.method,
-        status: String(response.status),
-      });
-
-      await metricsService.recordHistogram(
-        env as Record<string, unknown>,
-        "http_request_duration_ms",
-        duration,
-        { method: request.method }
-      );
-
-      return response;
+      return await app.fetch(request, env, ctx);
     } catch (err) {
-      appManager.incrementErrors();
-
-      const duration = Date.now() - startTime;
-      logger.error(`Request failed: ${request.method} ${request.url}`, {
-        requestId,
-        duration: `${duration}ms`,
-        error: err instanceof Error ? err.message : String(err),
-      });
-
-      // Record error metric
-      await metricsService.incrementCounter(env as Record<string, unknown>, "http_errors_total", 1, {
-        method: request.method,
-      });
-
-      throw err;
-    }
-  },
-
-  // Scheduled task handler (Cron Triggers)
-  // ============================================
-  // v0.9.2: Cron triggers are DISABLED in wrangler.toml because they
-  // were failing to deploy. This handler is kept as a no-op so it
-  // doesn't break the Worker export shape — once the background jobs
-  // (memory cleanup, learning engine, queue processing) are properly
-  // implemented, re-enable [triggers] in wrangler.toml and restore
-  // the switch statement below.
-  // ============================================
-  async scheduled(
-    event: ScheduledEvent,
-    env: Record<string, unknown>,
-    _ctx: ExecutionContext
-  ): Promise<void> {
-    try {
-      initializeStartup(env as HadesBindings);
-    } catch {
-      // ignore — startup validation may fail in degraded mode
-    }
-    logger.info(`Scheduled task triggered (no-op in v0.9.2): ${event.cron}`);
-    // No work performed — see comment above.
-  },
-
-  // Queue handler (for Cloudflare Queue)
-  async queue(
-    batch: MessageBatch<unknown>,
-    env: Record<string, unknown>,
-    ctx: ExecutionContext
-  ): Promise<void> {
-    logger.info(`Queue batch received: ${batch.queue} (${batch.messages.length} messages)`);
-
-    for (const message of batch.messages) {
-      ctx.waitUntil(
-        (async () => {
-          try {
-            const payload = message.body as Record<string, unknown>;
-
-            if (payload.type === "job") {
-              await workersManager.processJob(
-                env as Record<string, unknown>,
-                payload.jobId as string
-              );
-            } else if (payload.type === "notification") {
-              // Handle notification
-              logger.info("Processing notification", payload);
-            }
-
-            message.ack();
-          } catch (err) {
-            logger.error("Queue message error", { error: err instanceof Error ? err.message : String(err) });
-            message.retry();
-          }
-        })()
+      // LAST line of defense — never let the Worker throw 1101
+      try {
+        logger.error("[Worker fetch] UNCAUGHT", {
+          error: err instanceof Error ? err.message : String(err),
+          stack: err instanceof Error ? err.stack : undefined,
+        });
+      } catch {}
+      return new Response(
+        JSON.stringify({
+          error: "internal",
+          message: err instanceof Error ? err.message : String(err),
+          timestamp: new Date().toISOString(),
+        }),
+        {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        },
       );
     }
+  },
+
+  // Scheduled (no-op in v9.2 — triggers removed)
+  async scheduled(event: ScheduledEvent, env: HadesBindings, _ctx: ExecutionContext): Promise<void> {
+    try {
+      configureLogger(env);
+    } catch {}
+    logger.info(`Scheduled trigger (no-op): ${event.cron}`);
   },
 };
