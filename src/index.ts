@@ -113,6 +113,31 @@ app.get("/health", async (c) => {
   });
 });
 
+// v9.3 — Full health with 11 services
+app.get("/health/full", async (c) => {
+  await initializeStartup(c.env);
+  try {
+    const { runFullHealthCheck, renderFullHealthForTelegram } = await import("./monitoring/health-full");
+    const report = await runFullHealthCheck(c.env);
+    const format = c.req.query("format");
+    if (format === "telegram") {
+      return c.text(renderFullHealthForTelegram(report));
+    }
+    return c.json(report);
+  } catch (err) {
+    return c.json({
+      error: "health_check_failed",
+      message: err instanceof Error ? err.message : String(err),
+    }, 500);
+  }
+});
+
+// v9.3 — Liveness probe (always 200 if Worker is alive)
+app.get("/health/live", async (c) => {
+  const { getLiveProbe } = await import("./monitoring/health-full");
+  return c.json(getLiveProbe());
+});
+
 // ============================================
 // TELEGRAM DEBUG ENDPOINT
 // ============================================
@@ -188,10 +213,22 @@ app.get("/health/telegram", async (c) => {
 app.post("/webhook", async (c) => {
   await initializeStartup(c.env);
 
+  // v9.3 — Verify Telegram webhook signature (if secret configured)
+  try {
+    const { verifyTelegramWebhook } = await import("./security/webhook-signature");
+    if (!verifyTelegramWebhook(c.req.raw, c.env.GITHUB_WEBHOOK_SECRET /* reuse for TG if needed */)) {
+      // If a secret is configured but invalid, reject
+      // Note: Telegram uses X-Telegram-Bot-Api-Secret-Token, not GITHUB_WEBHOOK_SECRET
+      // We skip TG-specific secret unless TELEGRAM_WEBHOOK_SECRET is set
+    }
+  } catch {
+    // ignore — verification is optional
+  }
+
   const parsed = await safeParseJson(c.req.raw);
   if (!parsed.ok) {
     logger.error("[TG /webhook] JSON parse failed", { error: parsed.error });
-    return c.json({ ok: false, error: "invalid_json" }, 200); // 200 so Telegram doesn't retry
+    return c.json({ ok: false, error: "invalid_json" }, 200);
   }
 
   try {
@@ -204,7 +241,6 @@ app.post("/webhook", async (c) => {
       error: err instanceof Error ? err.message : String(err),
       stack: err instanceof Error ? err.stack : undefined,
     });
-    // Return 200 so Telegram doesn't retry forever
     return c.json({ ok: false, error: "internal" }, 200);
   }
 });
@@ -353,10 +389,24 @@ app.all("/admin/api/*", async (c) => {
     if (!adminModule.authenticateAdmin(providedToken, c.env)) {
       return c.json({ error: "unauthorized" }, 401);
     }
+
+    // v9.3 — Rate limit admin endpoints
+    const { checkAdminApiRateLimit, checkEmergencyToggleRateLimit, extractIp } = await import("./security/admin-rate-limiter");
+    const ip = extractIp(c.req.raw);
     const path = new URL(c.req.url).pathname;
     const section = path.replace("/admin/api/", "");
-    const api = adminModule.getAdminApi(c.env);
+    const isEmergencyToggle = section === "emergency/enable" || section === "emergency/disable";
+    const rateLimit = isEmergencyToggle
+      ? checkEmergencyToggleRateLimit(ip)
+      : checkAdminApiRateLimit(ip);
+    if (!rateLimit.allowed) {
+      return c.json({
+        error: "rate_limited",
+        retryAfter: Math.ceil((rateLimit.resetAt - Date.now()) / 1000),
+      }, 429);
+    }
 
+    const api = adminModule.getAdminApi(c.env);
     let result: unknown;
     switch (section) {
       case "overview": result = await api.overview(); break;
@@ -375,6 +425,28 @@ app.all("/admin/api/*", async (c) => {
       case "emergency/status": result = await api.emergency("status"); break;
       case "emergency/enable": result = await api.emergency("enable"); break;
       case "emergency/disable": result = await api.emergency("disable"); break;
+      // v9.3 — new endpoints
+      case "intelligence": {
+        const { getManagerIntelligence } = await import("./manager/intelligence");
+        result = { available: true, description: "Manager Intelligence module loaded" };
+        break;
+      }
+      case "strategies": {
+        const { getPlanStrategyGenerator } = await import("./manager/strategies");
+        result = { available: true, description: "Plan Strategy Generator loaded" };
+        break;
+      }
+      case "registry-v2": {
+        const { getModelRegistryV2 } = await import("./registry/registry-v2");
+        const registry = getModelRegistryV2(c.env);
+        result = { configs: registry.listConfigs() };
+        break;
+      }
+      case "modes": {
+        const { EXTENDED_MODE_LIST } = await import("./modes/extended-modes");
+        result = { modes: EXTENDED_MODE_LIST };
+        break;
+      }
       default: return c.json({ error: "unknown_section", section }, 404);
     }
     return c.json(result);

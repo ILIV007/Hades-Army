@@ -1,6 +1,6 @@
 {
   "name": "hades-army",
-  "version": "9.2.1",
+  "version": "9.3.0",
   "description": "Hades Army — Autonomous Repository-Aware Development Team (Cloudflare Workers Edition)",
   "type": "module",
   "scripts": {
