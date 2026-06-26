@@ -286,7 +286,10 @@ export class TelegramPipeline {
   }
 
   // ============================================
-  // v9.6 — Manager Execution Pipeline (calls LLM)
+  // v10.1 — Manager Execution Pipeline (calls LLM)
+  // FIXED: no intermediate edits (causes timing issues),
+  //        fallback to new message if edit fails,
+  //        timeout protection (25s — Worker limit is 30s)
   // ============================================
 
   private async executeManagerPipeline(
@@ -299,41 +302,36 @@ export class TelegramPipeline {
     const service = getTelegramService(this.env);
     if (!service) return;
 
-    // Send initial "processing" message (we'll edit it as we go)
+    // Send ONE initial message — we'll edit it ONCE at the end
     const progressMsg = await service.sendMessage(
       chatId,
       [
-        `📨 *Processing your request...*`,
+        `⏳ *Processing...*`,
         ``,
-        `⏳ Manager is thinking...`,
-        ``,
-        `📋 Trace: \`${this.traceId.slice(-8)}\``,
+        `_Manager is analyzing your request_`,
       ].join("\n"),
       { parseMode: "Markdown" },
     );
 
     const messageId = progressMsg.messageId;
 
-    try {
-      // Import the pipeline lazily
-      const { getManagerExecutionPipeline } = await import("../manager/execution-pipeline");
-
-      // Edit message: loading memory
+    // Helper: try to edit, fall back to new message if edit fails
+    const updateMessage = async (text: string): Promise<void> => {
       if (messageId) {
-        await service.editMessageText(chatId, messageId,
-          [
-            `📨 *Processing your request...*`,
-            ``,
-            `🧠 Loading memory...`,
-            ``,
-            `📋 Trace: \`${this.traceId.slice(-8)}\``,
-          ].join("\n"),
-          { parseMode: "Markdown" },
-        );
+        const editResult = await service.editMessageText(chatId, messageId, text, { parseMode: "Markdown" });
+        if (editResult.ok) return; // edit succeeded
+        // edit failed — fall back to sending a new message
+        logger.warn("[TG Pipeline] edit failed, sending new message", { error: editResult.error });
       }
+      await service.sendMessage(chatId, text, { parseMode: "Markdown" });
+    };
 
+    try {
+      const { getManagerExecutionPipeline } = await import("../manager/execution-pipeline");
       const pipeline = getManagerExecutionPipeline(this.env);
-      const result = await pipeline.execute({
+
+      // Run pipeline with 25s timeout (Worker limit is 30s)
+      const pipelinePromise = pipeline.execute({
         userPrompt,
         userId,
         repositoryFullName: activeRepo,
@@ -341,44 +339,36 @@ export class TelegramPipeline {
         traceId: this.traceId,
       });
 
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("Pipeline timed out (25s)")), 25000);
+      });
+
+      const result = await Promise.race([pipelinePromise, timeoutPromise]);
+
       if (result.ok) {
-        // Edit message with final response
-        if (messageId) {
-          await service.editMessageText(chatId, messageId, result.response, { parseMode: "Markdown" });
-        } else {
-          await service.sendMessage(chatId, result.response, { parseMode: "Markdown" });
-        }
+        await updateMessage(result.response);
       } else {
-        // Edit message with error
-        const errorText = [
+        await updateMessage([
           `⚠️ *Request failed*`,
           ``,
           result.error ?? "Unknown error",
           ``,
           `📋 Trace: \`${this.traceId.slice(-8)}\``,
-          ``,
-          `Use /menu to restart.`,
-        ].join("\n");
-        if (messageId) {
-          await service.editMessageText(chatId, messageId, errorText, { parseMode: "Markdown" });
-        } else {
-          await service.sendMessage(chatId, errorText, { parseMode: "Markdown" });
-        }
+        ].join("\n"));
       }
     } catch (err) {
-      // Fallback — edit message with error
-      const errorText = [
-        `⚠️ *Internal error*`,
+      const errMsg = err instanceof Error ? err.message : String(err);
+      logger.error("[TG Pipeline] FATAL", { traceId: this.traceId, error: errMsg });
+
+      await updateMessage([
+        `⚠️ *Error*`,
         ``,
-        err instanceof Error ? err.message : String(err),
+        errMsg,
         ``,
         `📋 Trace: \`${this.traceId.slice(-8)}\``,
-      ].join("\n");
-      if (messageId) {
-        await service.editMessageText(chatId, messageId, errorText, { parseMode: "Markdown" });
-      } else {
-        await service.sendMessage(chatId, errorText, { parseMode: "Markdown" });
-      }
+        ``,
+        `Use /menu to restart.`,
+      ].join("\n"));
     }
   }
 

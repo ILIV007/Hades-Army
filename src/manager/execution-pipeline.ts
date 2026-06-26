@@ -133,7 +133,7 @@ export class ManagerExecutionPipeline {
       logger.info("ManagerPipeline: prompt generated", { traceId, promptLength: userPrompt.length });
     }))
 
-    // === Step 6: LLM request ===
+    // === Step 6: LLM request (with fallback) ===
     let llmResponse = "";
     let modelUsed: { provider: string; model: string } | undefined;
     let tokensIn = 0;
@@ -141,6 +141,7 @@ export class ManagerExecutionPipeline {
     let costUsd = 0;
 
     steps.push(await this.runStep("llm_request", async () => {
+      // Try primary provider (Google Gemini) first
       try {
         const result = await this.registry.generateForAgent("manager", userPrompt, {
           maxTokens: 2048,
@@ -153,28 +154,70 @@ export class ManagerExecutionPipeline {
         tokensOut = result.tokensOut;
         costUsd = this.registry.estimateCostUsd("manager", tokensIn, tokensOut);
 
-        logger.info("ManagerPipeline: LLM response received", {
+        logger.info("ManagerPipeline: LLM response received (primary)", {
           traceId,
           model: `${modelUsed.provider}/${modelUsed.model}`,
           tokensIn,
           tokensOut,
-          costUsd,
           responseLength: llmResponse.length,
         });
-      } catch (err) {
-        const errorMsg = err instanceof Error ? err.message : String(err);
-        logger.error("ManagerPipeline: LLM request FAILED", { traceId, error: errorMsg });
-        throw new Error(`LLM request failed: ${errorMsg}`);
+        return; // success — don't try fallback
+      } catch (primaryErr) {
+        logger.warn("ManagerPipeline: primary LLM failed, trying fallback", {
+          traceId,
+          primaryError: primaryErr instanceof Error ? primaryErr.message : String(primaryErr),
+        });
+      }
+
+      // Fallback: try Cloudflare Workers AI (always available if AI binding exists)
+      try {
+        const providerInstance = this.registry.resolveProvider("cloudflare");
+        const fallbackResult = await providerInstance.generate({
+          model: "@cf/meta/llama-3.1-70b-instruct",
+          prompt: userPrompt,
+          maxTokens: 2048,
+          temperature: 0.4,
+          systemPrompt,
+        });
+        llmResponse = fallbackResult.content;
+        modelUsed = { provider: "cloudflare", model: "@cf/meta/llama-3.1-70b-instruct" };
+        tokensIn = fallbackResult.tokensIn;
+        tokensOut = fallbackResult.tokensOut;
+        costUsd = 0; // Cloudflare AI is free
+
+        logger.info("ManagerPipeline: LLM response received (fallback)", {
+          traceId,
+          model: `${modelUsed.provider}/${modelUsed.model}`,
+          tokensIn,
+          tokensOut,
+          responseLength: llmResponse.length,
+        });
+      } catch (fallbackErr) {
+        const errorMsg = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+        logger.error("ManagerPipeline: ALL LLM providers failed", { traceId, error: errorMsg });
+        throw new Error(`All AI providers unavailable. Primary error: see logs. Fallback error: ${errorMsg}`);
       }
     }))
 
-    // If LLM failed, return early
+    // If LLM failed, return early with helpful error
     const llmStep = steps[steps.length - 1];
     if (!llmStep.ok) {
       return {
         traceId,
         ok: false,
-        response: "⚠️ I couldn't process your request. The AI model is unavailable. Please try again later.",
+        response: [
+          `⚠️ *AI model unavailable*`,
+          ``,
+          `I couldn't reach any AI provider.`,
+          ``,
+          `Possible causes:`,
+          `• \`GOOGLE_AI_API_KEY\` not set or invalid`,
+          `• \`OPENROUTER_API_KEY\` not set or invalid`,
+          `• Cloudflare AI binding missing`,
+          ``,
+          `Ask the admin to check secrets with:`,
+          `\`wrangler secret list\``,
+        ].join("\n"),
         steps,
         durationMs: Date.now() - startMs,
         error: llmStep.error,
