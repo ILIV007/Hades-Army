@@ -279,6 +279,74 @@ app.post("/webhook/github", async (c) => {
 });
 
 // ============================================
+// v9.6 — GitHub OAuth Callback
+// ============================================
+
+app.get("/oauth/callback", async (c) => {
+  await initializeStartup(c.env);
+  const code = c.req.query("code");
+  const state = c.req.query("state");
+  const error = c.req.query("error");
+
+  if (error) {
+    return c.html(`<html><body><h2>❌ Authorization Failed</h2><p>GitHub returned: ${error}</p><p>You can close this window and return to Telegram.</p></body></html>`);
+  }
+
+  if (!code || !state) {
+    return c.html(`<html><body><h2>❌ Missing Parameters</h2><p>No code or state received from GitHub.</p></body></html>`, 400);
+  }
+
+  try {
+    const { getGitHubOAuthManager } = await import("./github/oauth-manager");
+    const oauth = getGitHubOAuthManager(c.env);
+    const result = await oauth.exchangeCodeForToken(code, state);
+
+    if (!result.ok) {
+      return c.html(`<html><body><h2>❌ Token Exchange Failed</h2><p>${result.error}</p></body></html>`, 400);
+    }
+
+    // Notify the user via Telegram
+    if (result.telegramUserId && result.chatId) {
+      const { getTelegramService } = await import("./integrations/telegram-service");
+      const service = getTelegramService(c.env);
+      if (service) {
+        await service.sendMessage(
+          result.chatId,
+          [
+            `✅ *GitHub Connected!*`,
+            ``,
+            `Your GitHub account is now linked to Hades Army.`,
+            ``,
+            `Tap below to select a repository:`,
+          ].join("\n"),
+          {
+            parseMode: "Markdown",
+            replyMarkup: {
+              inline_keyboard: [
+                [{ text: "📦 Select Repository", callback_data: "home:select_repo" }],
+                [{ text: "🏠 Home", callback_data: "home:main" }],
+              ],
+            },
+          },
+        );
+      }
+    }
+
+    return c.html(
+      `<html><body style="font-family:sans-serif;text-align:center;padding:40px">` +
+      `<h1>✅ GitHub Connected!</h1>` +
+      `<p>Your GitHub account is now linked to Hades Army.</p>` +
+      `<p>You can close this window and return to Telegram.</p>` +
+      `<script>setTimeout(() => window.close(), 3000);</script>` +
+      `</body></html>`,
+    );
+  } catch (err) {
+    logger.error("[OAuth Callback] FATAL", { error: err instanceof Error ? err.message : String(err) });
+    return c.html(`<html><body><h2>❌ Internal Error</h2><p>${err instanceof Error ? err.message : String(err)}</p></body></html>`, 500);
+  }
+});
+
+// ============================================
 // ADMIN DASHBOARD (HTML)
 // ============================================
 

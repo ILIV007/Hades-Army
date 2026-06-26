@@ -281,20 +281,105 @@ export class TelegramPipeline {
       return;
     }
 
-    // Free-text request
-    await service.sendMessage(
+    // Free-text request — v9.6: ACTUALLY call the Manager Execution Pipeline
+    await this.executeManagerPipeline(chatId, userId, text, state, activeRepo);
+  }
+
+  // ============================================
+  // v9.6 — Manager Execution Pipeline (calls LLM)
+  // ============================================
+
+  private async executeManagerPipeline(
+    chatId: number,
+    userId: string,
+    userPrompt: string,
+    state: ConversationState,
+    activeRepo: string | undefined,
+  ): Promise<void> {
+    const service = getTelegramService(this.env);
+    if (!service) return;
+
+    // Send initial "processing" message (we'll edit it as we go)
+    const progressMsg = await service.sendMessage(
       chatId,
       [
-        `📨 *Request received*`,
+        `📨 *Processing your request...*`,
         ``,
-        `*Repository:* \`${activeRepo}\``,
-        `*State:* ${STATE_METADATA[state].emoji} ${STATE_METADATA[state].label}`,
-        `*Trace:* \`${this.traceId}\``,
+        `⏳ Manager is thinking...`,
         ``,
-        `_Manager pipeline invocation pending — wire up in v9.6_`,
+        `📋 Trace: \`${this.traceId.slice(-8)}\``,
       ].join("\n"),
       { parseMode: "Markdown" },
     );
+
+    const messageId = progressMsg.messageId;
+
+    try {
+      // Import the pipeline lazily
+      const { getManagerExecutionPipeline } = await import("../manager/execution-pipeline");
+
+      // Edit message: loading memory
+      if (messageId) {
+        await service.editMessageText(chatId, messageId,
+          [
+            `📨 *Processing your request...*`,
+            ``,
+            `🧠 Loading memory...`,
+            ``,
+            `📋 Trace: \`${this.traceId.slice(-8)}\``,
+          ].join("\n"),
+          { parseMode: "Markdown" },
+        );
+      }
+
+      const pipeline = getManagerExecutionPipeline(this.env);
+      const result = await pipeline.execute({
+        userPrompt,
+        userId,
+        repositoryFullName: activeRepo,
+        mode: STATE_METADATA[state].label.toLowerCase().replace(" mode", ""),
+        traceId: this.traceId,
+      });
+
+      if (result.ok) {
+        // Edit message with final response
+        if (messageId) {
+          await service.editMessageText(chatId, messageId, result.response, { parseMode: "Markdown" });
+        } else {
+          await service.sendMessage(chatId, result.response, { parseMode: "Markdown" });
+        }
+      } else {
+        // Edit message with error
+        const errorText = [
+          `⚠️ *Request failed*`,
+          ``,
+          result.error ?? "Unknown error",
+          ``,
+          `📋 Trace: \`${this.traceId.slice(-8)}\``,
+          ``,
+          `Use /menu to restart.`,
+        ].join("\n");
+        if (messageId) {
+          await service.editMessageText(chatId, messageId, errorText, { parseMode: "Markdown" });
+        } else {
+          await service.sendMessage(chatId, errorText, { parseMode: "Markdown" });
+        }
+      }
+    } catch (err) {
+      // Fallback — edit message with error
+      const errorText = [
+        `⚠️ *Internal error*`,
+        ``,
+        err instanceof Error ? err.message : String(err),
+        ``,
+        `📋 Trace: \`${this.traceId.slice(-8)}\``,
+      ].join("\n");
+      if (messageId) {
+        await service.editMessageText(chatId, messageId, errorText, { parseMode: "Markdown" });
+      } else {
+        await service.sendMessage(chatId, errorText, { parseMode: "Markdown" });
+      }
+    }
   }
 
   // ============================================
@@ -400,7 +485,78 @@ export class TelegramPipeline {
 
       case "new_project":
       case "connect_repo":
-        // === WIZARD ENTRY: transition to WAITING_REPO_URL ===
+        // v9.6 — Check if user has GitHub OAuth token
+        try {
+          const { getGitHubOAuthManager } = await import("../github/oauth-manager");
+          const oauth = getGitHubOAuthManager(this.env);
+          const hasToken = await oauth.hasToken(userId);
+
+          if (!hasToken) {
+            // No token — offer OAuth or manual URL
+            if (oauth.isOAuthConfigured()) {
+              await service.sendMessage(
+                chatId,
+                [
+                  `🔗 *Connect Repository*`,
+                  ``,
+                  `You need to authorize GitHub first.`,
+                  ``,
+                  `Tap below to open GitHub OAuth:`,
+                ].join("\n"),
+                {
+                  parseMode: "Markdown",
+                  replyMarkup: {
+                    inline_keyboard: [
+                      [{ text: "🔐 Authorize GitHub", callback_data: "home:github_oauth" }],
+                      [{ text: "✏️ Enter URL manually", callback_data: "home:manual_repo" }],
+                      [{ text: "🔙 Home", callback_data: "home:main" }],
+                    ],
+                  },
+                },
+              );
+            } else {
+              // OAuth not configured — fall back to manual URL
+              await csm.transition(userId, "WAITING_REPO_URL");
+              await service.sendMessage(
+                chatId,
+                [
+                  `🔗 *Connect Repository*`,
+                  ``,
+                  `Send me the repository URL or \`owner/name\`:`,
+                  ``,
+                  `Examples:`,
+                  `• \`https://github.com/owner/repo\``,
+                  `• \`owner/repo\``,
+                ].join("\n"),
+                {
+                  parseMode: "Markdown",
+                  replyMarkup: { inline_keyboard: [[{ text: "🔙 Cancel", callback_data: "home:main" }]] },
+                },
+              );
+            }
+            return;
+          }
+
+          // Has token — show repository list
+          await this.showRepositoryList(chatId, userId);
+        } catch (err) {
+          // Fallback to manual URL
+          await csm.transition(userId, "WAITING_REPO_URL");
+          await service.sendMessage(
+            chatId,
+            `🔗 Send me the repository URL (\`owner/repo\`):`,
+            { parseMode: "Markdown" },
+          );
+        }
+        return;
+
+      case "github_oauth":
+        // v9.6 — Start OAuth flow
+        await this.startGitHubOAuth(chatId, userId);
+        return;
+
+      case "manual_repo":
+        // v9.6 — Manual URL entry (fallback)
         await csm.transition(userId, "WAITING_REPO_URL");
         await service.sendMessage(
           chatId,
@@ -408,22 +564,17 @@ export class TelegramPipeline {
             `🔗 *Connect Repository*`,
             ``,
             `Send me the repository URL or \`owner/name\`:`,
-            ``,
-            `Examples:`,
-            `• \`https://github.com/owner/repo\``,
-            `• \`owner/repo\``,
-            ``,
-            `_I'll validate the repository before connecting._`,
           ].join("\n"),
           {
             parseMode: "Markdown",
-            replyMarkup: {
-              inline_keyboard: [
-                [{ text: "🔙 Cancel", callback_data: "home:main" }],
-              ],
-            },
+            replyMarkup: { inline_keyboard: [[{ text: "🔙 Cancel", callback_data: "home:main" }]] },
           },
         );
+        return;
+
+      case "select_repo":
+        // v9.6 — Show user's repos from their GitHub token
+        await this.showRepositoryList(chatId, userId);
         return;
 
       case "repositories":
@@ -1213,6 +1364,127 @@ export class TelegramPipeline {
 
   private stateMachine(userId: string): ReturnType<typeof getConversationStateMachine> {
     return getConversationStateMachine(this.env);
+  }
+
+  // ============================================
+  // v9.6 — GitHub OAuth helpers
+  // ============================================
+
+  private async startGitHubOAuth(chatId: number, userId: string): Promise<void> {
+    const service = getTelegramService(this.env);
+    if (!service) return;
+
+    try {
+      const { getGitHubOAuthManager } = await import("../github/oauth-manager");
+      const oauth = getGitHubOAuthManager(this.env);
+
+      if (!oauth.isOAuthConfigured()) {
+        await service.sendMessage(
+          chatId,
+          [
+            `❌ *GitHub OAuth not configured*`,
+            ``,
+            `The admin needs to set:`,
+            `• \`OAUTH_GITHUB_CLIENT_ID\``,
+            `• \`OAUTH_GITHUB_CLIENT_SECRET\``,
+            ``,
+            `Use "Enter URL manually" as fallback.`,
+          ].join("\n"),
+          {
+            parseMode: "Markdown",
+            replyMarkup: { inline_keyboard: [[{ text: "✏️ Manual URL", callback_data: "home:manual_repo" }]] },
+          },
+        );
+        return;
+      }
+
+      // We need the worker URL — derive from a known endpoint
+      // In production, this would come from the request
+      const workerUrl = `https://hades-army.iliv007.workers.dev`;
+      const result = await oauth.createAuthorizationUrl(userId, chatId, workerUrl);
+
+      if ("error" in result) {
+        await service.sendMessage(chatId, `❌ ${result.error}`, { parseMode: "Markdown" });
+        return;
+      }
+
+      await service.sendMessage(
+        chatId,
+        [
+          `🔐 *GitHub Authorization*`,
+          ``,
+          `Tap the button below to authorize Hades Army on GitHub:`,
+          ``,
+          `_You'll be redirected to GitHub. After authorizing, you'll come back here automatically._`,
+        ].join("\n"),
+        {
+          parseMode: "Markdown",
+          replyMarkup: {
+            inline_keyboard: [
+              [{ text: "🔐 Authorize on GitHub", url: result.url }],
+              [{ text: "🔙 Cancel", callback_data: "home:main" }],
+            ],
+          },
+        },
+      );
+    } catch (err) {
+      await service.sendMessage(chatId, `❌ OAuth error: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  private async showRepositoryList(chatId: number, userId: string): Promise<void> {
+    const service = getTelegramService(this.env);
+    if (!service) return;
+
+    await service.sendMessage(chatId, `📦 *Loading your repositories...*`, { parseMode: "Markdown" });
+
+    try {
+      const { getGitHubOAuthManager } = await import("../github/oauth-manager");
+      const oauth = getGitHubOAuthManager(this.env);
+      const repos = await oauth.fetchUserRepositories(userId);
+
+      if (repos.length === 0) {
+        await service.sendMessage(
+          chatId,
+          [
+            `📦 *No repositories found*`,
+            ``,
+            `Your GitHub account has no repositories, or the token lacks access.`,
+          ].join("\n"),
+          {
+            parseMode: "Markdown",
+            replyMarkup: { inline_keyboard: [[{ text: "🔙 Home", callback_data: "home:main" }]] },
+          },
+        );
+        return;
+      }
+
+      // Show top 10 repos as buttons
+      const keyboard: Array<Array<{ text: string; callback_data: string }>> = [];
+      const topRepos = repos.slice(0, 10);
+      for (const repo of topRepos) {
+        const vis = repo.private ? "🔒" : "🌐";
+        const lang = repo.language ? ` [${repo.language}]` : "";
+        keyboard.push([{
+          text: `${vis} ${repo.fullName}${lang}`,
+          callback_data: `repos:select:${repo.fullName}`,
+        }]);
+      }
+      keyboard.push([{ text: "🔙 Home", callback_data: "home:main" }]);
+
+      const text = [
+        `📦 *Your Repositories* (${repos.length} total)`,
+        ``,
+        `Tap a repository to connect:`,
+      ].join("\n");
+
+      await service.sendMessage(chatId, text, {
+        parseMode: "Markdown",
+        replyMarkup: { inline_keyboard: keyboard },
+      });
+    } catch (err) {
+      await service.sendMessage(chatId, `❌ Failed to load repos: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 }
 
