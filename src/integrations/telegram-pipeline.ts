@@ -1,15 +1,22 @@
 /**
- * Telegram Pipeline v9.4.1 - Cloudflare Workers Edition
- * Hades Army v9.4.1 — Unified UX
+ * Telegram Pipeline v9.5 - Cloudflare Workers Edition
+ * Hades Army v9.5 — State-Driven Conversation Engine
  *
- * COMPLETE REWRITE of callback routing:
- *   - ALL inline buttons have handlers — no "unknown action"
- *   - Unified router handles: home:*, menu:*, repos:*, mode:*, help:*, onboard:*
- *   - /start is SEPARATE from /menu (welcome vs home screen)
- *   - /start shows welcome message with channel link @ILIVIR3
- *   - /menu shows the home screen
- *   - Update deduplication prevents duplicate messages
- *   - Every step wrapped in try/catch — never silent
+ * COMPLETE REWRITE with proper State Machine:
+ *
+ *   HOME → WAITING_REPO_URL → VALIDATING_REPO → PROJECT_CREATED → PLAN/BUILD
+ *
+ * The Message Router checks the user's state BEFORE dispatching.
+ * No handler runs outside of its expected state.
+ *
+ * Wizard flow:
+ *   1. User taps "Connect Repo" → state = WAITING_REPO_URL
+ *   2. User sends URL → state = VALIDATING_REPO → run validator
+ *   3. Validation passes → connect repo → state = PROJECT_CREATED
+ *   4. Validation fails → show error → state = WAITING_REPO_URL (retry) or HOME
+ *
+ * Every step wrapped in try/catch — never silent.
+ * Update deduplication prevents duplicate messages.
  */
 
 import { logger } from "../utils/logger";
@@ -18,7 +25,16 @@ import type { HadesBindings } from "../types";
 import { getTelegramService, recordTelegramEvent } from "../integrations/telegram-service";
 import { getConversationMemory } from "../memory/conversation-memory";
 import { getRepositoryManager } from "../github/repository-manager";
+import { getRepositoryValidator } from "../github/repository-validator";
+import { getConversationStateMachine, STATE_METADATA, type ConversationState } from "../conversation/state-machine";
 import { runHealthCheck, renderHealthReport } from "../monitoring/health-dashboard";
+
+// ============================================
+// Constants
+// ============================================
+
+const CHANNEL_LINK = "@ILIVIR3";
+const VERSION_FALLBACK = "9.5";
 
 // ============================================
 // Types
@@ -43,7 +59,7 @@ export interface TelegramUpdate {
 }
 
 // ============================================
-// Update ID deduplication
+// Update ID deduplication (single source of truth)
 // ============================================
 
 const MAX_DEDUP_IDS = 200;
@@ -68,9 +84,6 @@ function isDuplicateUpdate(updateId: number): boolean {
 // Pipeline
 // ============================================
 
-const CHANNEL_LINK = "@ILIVIR3";
-const VERSION_FALLBACK = "9.4.1";
-
 export class TelegramPipeline {
   private env: HadesBindings;
   private traceId: string;
@@ -81,7 +94,7 @@ export class TelegramPipeline {
   }
 
   async processUpdate(update: TelegramUpdate): Promise<{ ok: boolean; traceId: string }> {
-    // Deduplicate
+    // === STEP 0: Deduplicate by update_id (BEFORE anything else) ===
     if (update.update_id !== undefined && isDuplicateUpdate(update.update_id)) {
       return { ok: true, traceId: this.traceId };
     }
@@ -121,7 +134,7 @@ export class TelegramPipeline {
   }
 
   // ============================================
-  // Message handler — /start is SEPARATE from /menu
+  // Message Router — checks state BEFORE dispatching
   // ============================================
 
   private async handleMessage(msg: NonNullable<TelegramUpdate["message"]>): Promise<void> {
@@ -137,76 +150,95 @@ export class TelegramPipeline {
       return;
     }
 
-    // === /start — WELCOME MESSAGE (separate from /menu) ===
+    // === Commands always work regardless of state ===
     if (text === "/start") {
       await this.sendWelcome(chatId);
       return;
     }
-
-    // === /menu — HOME SCREEN ===
     if (text === "/menu" || text === "/home") {
+      await this.stateMachine(userId).transition(userId, "HOME");
       await this.sendHomeScreen(chatId, userId);
       return;
     }
-
-    // === /help ===
     if (text === "/help") {
       await this.sendHelp(chatId);
       return;
     }
+    if (text === "/reset") {
+      try {
+        const csm = this.stateMachine(userId);
+        await csm.reset(userId);
+        const convMem = getConversationMemory(this.env);
+        await convMem.reset(userId);
+      } catch {}
+      await service.sendMessage(chatId, `🧹 Reset complete. State: *Home*`, { parseMode: "Markdown" });
+      return;
+    }
 
-    // === Mode commands ===
+    // === State-driven routing ===
+    const csm = this.stateMachine(userId);
+    const stateCtx = await csm.getState(userId);
+    const state = stateCtx.state;
+
+    logger.info("[TG Router] state-driven", { userId, state, text: text.slice(0, 50) });
+
+    switch (state) {
+      case "WAITING_REPO_URL":
+        // User is in the wizard — treat ANY text (that's not a command) as a repo URL
+        await this.handleRepositoryConnect(chatId, userId, text);
+        return;
+
+      case "VALIDATING_REPO":
+        await service.sendMessage(chatId, `⏳ Still validating repository... please wait.`, { parseMode: "Markdown" });
+        return;
+
+      case "WAITING_APPROVAL":
+        // User is responding to an approval request
+        await service.sendMessage(
+          chatId,
+          `Please use the buttons (✅ Approve / ❌ Reject) to respond.`,
+          { parseMode: "Markdown" },
+        );
+        return;
+
+      case "WAITING_CLARIFICATION":
+        // User is answering a Manager question
+        await service.sendMessage(
+          chatId,
+          [
+            `❓ *Answer recorded*`,
+            ``,
+            `_Manager will process your answer: ${text.slice(0, 200)}_`,
+            ``,
+            `Trace: \`${this.traceId}\``,
+          ].join("\n"),
+          { parseMode: "Markdown" },
+        );
+        await csm.transition(userId, "PLAN_MODE");
+        return;
+    }
+
+    // === Mode commands (only valid when not in wizard) ===
     const modeMatch = text.match(/^\/(plan|build|explore|analyze|review|debug|architect|chat)$/);
     if (modeMatch) {
       await this.switchMode(chatId, userId, modeMatch[1]);
       return;
     }
 
-    // === /repositories ===
     if (text === "/repositories" || text === "/repos") {
       await this.showRepositories(chatId, userId);
       return;
     }
-
-    // === /health ===
     if (text === "/health") {
       await this.showHealth(chatId);
       return;
     }
-
-    // === /memory ===
     if (text === "/memory") {
       await this.showMemorySnapshot(chatId, userId);
       return;
     }
 
-    // === /reset ===
-    if (text === "/reset") {
-      try {
-        const convMem = getConversationMemory(this.env);
-        await convMem.reset(userId);
-      } catch {}
-      await service.sendMessage(chatId, `🧹 Memory reset. Mode is now *Plan*.`, { parseMode: "Markdown" });
-      return;
-    }
-
-    // === Free text — check wizard state ===
-    let activeWorkflow: string | undefined;
-    let activeRepo: string | undefined;
-    try {
-      const convMem = getConversationMemory(this.env);
-      const state = await convMem.load(userId);
-      activeWorkflow = state.state.activeWorkflow;
-      activeRepo = state.state.activeRepository;
-    } catch {}
-
-    // Repository wizard
-    if (activeWorkflow === "wizard:connect_repo") {
-      await this.handleRepositoryConnect(chatId, userId, text);
-      return;
-    }
-
-    // Short message
+    // === Free text — depends on state ===
     if (text.length < 3) {
       await service.sendMessage(
         chatId,
@@ -220,14 +252,21 @@ export class TelegramPipeline {
       return;
     }
 
-    // No repo connected
+    // Check if repo is connected
+    let activeRepo: string | undefined;
+    try {
+      const convMem = getConversationMemory(this.env);
+      const snap = await convMem.getSnapshot(userId);
+      activeRepo = snap.activeRepository;
+    } catch {}
+
     if (!activeRepo) {
       await service.sendMessage(
         chatId,
         [
           `🔗 *Connect a repository first*`,
           ``,
-          `Tap below to start:`,
+          `Tap below to start the wizard:`,
         ].join("\n"),
         {
           parseMode: "Markdown",
@@ -242,23 +281,24 @@ export class TelegramPipeline {
       return;
     }
 
-    // Free text request
+    // Free-text request
     await service.sendMessage(
       chatId,
       [
         `📨 *Request received*`,
         ``,
-        `Repository: \`${activeRepo}\``,
-        `Trace: \`${this.traceId}\``,
+        `*Repository:* \`${activeRepo}\``,
+        `*State:* ${STATE_METADATA[state].emoji} ${STATE_METADATA[state].label}`,
+        `*Trace:* \`${this.traceId}\``,
         ``,
-        `_Manager pipeline invocation pending — wire up in v9.5_`,
+        `_Manager pipeline invocation pending — wire up in v9.6_`,
       ].join("\n"),
       { parseMode: "Markdown" },
     );
   }
 
   // ============================================
-  // UNIFIED Callback Query Router
+  // Unified Callback Router
   // ============================================
 
   private async handleCallbackQuery(cq: NonNullable<TelegramUpdate["callback_query"]>): Promise<void> {
@@ -277,40 +317,30 @@ export class TelegramPipeline {
       const [prefix, action] = data.split(":");
 
       switch (prefix) {
-        // === HOME screen callbacks ===
         case "home":
           await this.handleHomeCallback(chatId, userId, action);
           return;
-
-        // === MENU (legacy compatibility) ===
         case "menu":
           await this.handleMenuCallback(chatId, userId, action);
           return;
-
-        // === REPOS callbacks ===
         case "repos":
           await this.handleReposCallback(chatId, userId, action);
           return;
-
-        // === MODE switch ===
         case "mode":
           if (action === "switch") {
-            // data format: mode:switch:plan
             const targetMode = data.split(":")[2];
             if (targetMode) await this.switchMode(chatId, userId, targetMode);
           }
           return;
-
-        // === HELP callbacks ===
         case "help":
           await this.handleHelpCallback(chatId, userId, action);
           return;
-
-        // === ONBOARDING callbacks ===
         case "onboard":
           await this.handleOnboardCallback(chatId, userId, action);
           return;
-
+        case "approval":
+          await this.handleApprovalCallback(chatId, userId, action);
+          return;
         default:
           await service.sendMessage(
             chatId,
@@ -319,11 +349,7 @@ export class TelegramPipeline {
           );
       }
     } catch (err) {
-      logger.error("[TG] Callback handler error", {
-        traceId: this.traceId,
-        data,
-        err: err instanceof Error ? err.message : String(err),
-      });
+      logger.error("[TG] Callback error", { traceId: this.traceId, data, err: err instanceof Error ? err.message : String(err) });
       await service.sendMessage(
         chatId,
         `⚠️ Action failed. Reference: \`${this.traceId}\``,
@@ -339,10 +365,12 @@ export class TelegramPipeline {
   private async handleHomeCallback(chatId: number, userId: string, action: string | undefined): Promise<void> {
     const service = getTelegramService(this.env);
     if (!service) return;
+    const csm = this.stateMachine(userId);
 
     switch (action) {
       case "main":
       case "back":
+        await csm.transition(userId, "HOME");
         await this.sendHomeScreen(chatId, userId);
         return;
 
@@ -372,11 +400,8 @@ export class TelegramPipeline {
 
       case "new_project":
       case "connect_repo":
-        // Set wizard state
-        try {
-          const convMem = getConversationMemory(this.env);
-          await convMem.setActiveWorkflow(userId, "wizard:connect_repo");
-        } catch {}
+        // === WIZARD ENTRY: transition to WAITING_REPO_URL ===
+        await csm.transition(userId, "WAITING_REPO_URL");
         await service.sendMessage(
           chatId,
           [
@@ -387,6 +412,8 @@ export class TelegramPipeline {
             `Examples:`,
             `• \`https://github.com/owner/repo\``,
             `• \`owner/repo\``,
+            ``,
+            `_I'll validate the repository before connecting._`,
           ].join("\n"),
           {
             parseMode: "Markdown",
@@ -406,11 +433,7 @@ export class TelegramPipeline {
       case "tasks":
         await service.sendMessage(
           chatId,
-          [
-            `📋 *Tasks*`,
-            ``,
-            `No active tasks.`,
-          ].join("\n"),
+          [`📋 *Tasks*`, ``, `No active tasks.`].join("\n"),
           {
             parseMode: "Markdown",
             replyMarkup: { inline_keyboard: [[{ text: "🔙 Home", callback_data: "home:main" }]] },
@@ -429,11 +452,7 @@ export class TelegramPipeline {
       case "activity":
         await service.sendMessage(
           chatId,
-          [
-            `📊 *Activity*`,
-            ``,
-            `No recent activity.`,
-          ].join("\n"),
+          [`📊 *Activity*`, ``, `No recent activity.`].join("\n"),
           {
             parseMode: "Markdown",
             replyMarkup: { inline_keyboard: [[{ text: "🔙 Home", callback_data: "home:main" }]] },
@@ -464,11 +483,7 @@ export class TelegramPipeline {
       case "cost":
         await service.sendMessage(
           chatId,
-          [
-            `💰 *Cost Report*`,
-            ``,
-            `Cost tracking is available via the admin dashboard.`,
-          ].join("\n"),
+          [`💰 *Cost Report*`, ``, `Cost tracking is available via the admin dashboard.`].join("\n"),
           {
             parseMode: "Markdown",
             replyMarkup: { inline_keyboard: [[{ text: "🔙 Home", callback_data: "home:main" }]] },
@@ -477,24 +492,19 @@ export class TelegramPipeline {
         return;
 
       default:
-        await service.sendMessage(
-          chatId,
-          `Unknown home action: \`${action}\``,
-          { parseMode: "Markdown" },
-        );
+        await service.sendMessage(chatId, `Unknown home action: \`${action}\``, { parseMode: "Markdown" });
     }
   }
 
   // ============================================
-  // Menu callback handler (legacy compatibility)
+  // Menu callback handler (legacy compat)
   // ============================================
 
   private async handleMenuCallback(chatId: number, userId: string, action: string | undefined): Promise<void> {
-    // Map old menu:* callbacks to home:* handlers
     switch (action) {
       case "main":
       case "back":
-        await this.sendHomeScreen(chatId, userId);
+        await this.handleHomeCallback(chatId, userId, "main");
         return;
       case "connect_repository":
         await this.handleHomeCallback(chatId, userId, "connect_repo");
@@ -518,7 +528,6 @@ export class TelegramPipeline {
         await this.showSettings(chatId, userId);
         return;
       default:
-        // Forward to home handler
         await this.handleHomeCallback(chatId, userId, action);
     }
   }
@@ -531,7 +540,6 @@ export class TelegramPipeline {
     const service = getTelegramService(this.env);
     if (!service) return;
 
-    // data format: repos:select:owner/repo or repos:rescan:owner/repo or repos:remove:owner/repo
     const parts = action ? action.split(":") : [];
     const subAction = parts[0];
     const repoFullName = parts.slice(1).join(":");
@@ -542,44 +550,37 @@ export class TelegramPipeline {
           try {
             const convMem = getConversationMemory(this.env);
             await convMem.setActiveRepository(userId, repoFullName);
+            const csm = this.stateMachine(userId);
+            await csm.transition(userId, "PROJECT_CREATED");
           } catch {}
-          await service.sendMessage(
-            chatId,
-            `✅ Active repository: \`${repoFullName}\``,
-            { parseMode: "Markdown" },
-          );
+          await service.sendMessage(chatId, `✅ Active repository: \`${repoFullName}\``, { parseMode: "Markdown" });
         }
         return;
-
       case "rescan":
         if (repoFullName) {
           await service.sendMessage(chatId, `🔄 Rescanning \`${repoFullName}\`...`, { parseMode: "Markdown" });
           try {
             const repoManager = getRepositoryManager(this.env);
-            const result = await repoManager.rescan(userId, repoFullName);
-            if ("ok" in result && result.ok === false) {
-              await service.sendMessage(chatId, `❌ Rescan failed: ${result.reason}`);
-            } else {
-              await service.sendMessage(chatId, `✅ Rescan complete.`, { parseMode: "Markdown" });
-            }
+            await repoManager.rescan(userId, repoFullName);
+            await service.sendMessage(chatId, `✅ Rescan complete.`, { parseMode: "Markdown" });
           } catch (err) {
             await service.sendMessage(chatId, `❌ Rescan error: ${err instanceof Error ? err.message : String(err)}`);
           }
         }
         return;
-
       case "remove":
         if (repoFullName) {
           try {
             const repoManager = getRepositoryManager(this.env);
             await repoManager.remove(userId, repoFullName);
-            await service.sendMessage(chatId, `🗑 Removed \`${repoFullName}\``, { parseMode: "Markdown" });
-          } catch (err) {
-            await service.sendMessage(chatId, `❌ Remove failed: ${err instanceof Error ? err.message : String(err)}`);
-          }
+            const convMem = getConversationMemory(this.env);
+            await convMem.clearWorkflow(userId);
+            const csm = this.stateMachine(userId);
+            await csm.transition(userId, "HOME");
+          } catch {}
+          await service.sendMessage(chatId, `🗑 Removed \`${repoFullName}\``, { parseMode: "Markdown" });
         }
         return;
-
       default:
         await this.showRepositories(chatId, userId);
     }
@@ -594,62 +595,13 @@ export class TelegramPipeline {
     if (!service) return;
 
     const topics: Record<string, string> = {
-      planning: [
-        `🧠 *How Planning Works*`,
-        ``,
-        `1. Switch to PLAN mode: /plan`,
-        `2. Describe what you want`,
-        `3. Manager asks clarifying questions`,
-        `4. Manager produces 3 strategies:`,
-        `   • ⚡ Fast — minimal change`,
-        `   • ⚖️ Balanced — production-ready`,
-        `   • 🏛 Enterprise — bullet-proof`,
-        `5. You choose a strategy`,
-        `6. Manager generates task breakdown`,
-        ``,
-        `No code is generated in PLAN mode.`,
-      ].join("\n"),
-      build: [
-        `⚒ *How Build Works*`,
-        ``,
-        `1. Switch to BUILD mode: /build`,
-        `2. Have an approved plan (from PLAN mode)`,
-        `3. Manager assigns task to Builder`,
-        `4. Builder generates patch`,
-        `5. Reviewer validates patch`,
-        `6. Manager summarizes`,
-        `7. You approve`,
-        `8. PR is created on GitHub`,
-        `9. You merge`,
-        ``,
-        `Never auto-merges. Always requires your approval.`,
-      ].join("\n"),
-      approval: [
-        `✅ *How Approval Works*`,
-        ``,
-        `Before any PR is created:`,
-        `• Manager shows a summary`,
-        `• Files changed, risk, impact`,
-        `• You choose: Approve / Reject / Request changes`,
-        ``,
-        `PR is only created after you tap "Approve".`,
-      ].join("\n"),
-      memory: [
-        `🧠 *How Memory Works*`,
-        ``,
-        `Hades Army remembers:`,
-        `• Repository architecture`,
-        `• Past decisions (ADRs)`,
-        `• Failed approaches (lessons)`,
-        `• Coding conventions`,
-        `• Recent conversations`,
-        ``,
-        `Memory is per-project and persistent.`,
-        `Use /memory to view your snapshot.`,
-      ].join("\n"),
+      planning: `🧠 *Planning*\n\n1. /plan mode\n2. Describe request\n3. Manager asks questions\n4. 3 strategies: Fast / Balanced / Enterprise\n5. Choose strategy\n6. Task breakdown\n\nNo code changes in Plan mode.`,
+      build: `⚒ *Build*\n\n1. /build mode\n2. Need approved plan\n3. Manager → Builder → Reviewer\n4. Manager summarizes\n5. You approve\n6. PR created\n7. You merge\n\nNever auto-merges.`,
+      approval: `✅ *Approval*\n\nBefore PR:\n• Manager shows summary\n• Files, risk, impact\n• Approve / Reject / Request changes\n\nPR only after Approve.`,
+      memory: `🧠 *Memory*\n\nPer-project:\n• Architecture\n• Decisions (ADRs)\n• Failed approaches\n• Conventions\n• Recent conversations\n\nUse /memory to view.`,
     };
 
-    const text = topics[action ?? ""] ?? `Unknown help topic: ${action}`;
+    const text = topics[action ?? ""] ?? `Unknown topic: ${action}`;
     await service.sendMessage(chatId, text, {
       parseMode: "Markdown",
       replyMarkup: { inline_keyboard: [[{ text: "🔙 Help", callback_data: "home:help" }]] },
@@ -660,14 +612,194 @@ export class TelegramPipeline {
   // Onboarding callback handler
   // ============================================
 
-  private async handleOnboardCallback(chatId: number, _userId: string, action: string | undefined): Promise<void> {
+  private async handleOnboardCallback(chatId: number, userId: string, action: string | undefined): Promise<void> {
     if (action === "skip" || action === "finish") {
-      await this.sendHomeScreen(chatId, _userId);
+      await this.sendHomeScreen(chatId, userId);
       return;
     }
-    // onboard:N (step number)
     const step = parseInt(action ?? "1", 10);
     await this.sendOnboardingStep(chatId, step);
+  }
+
+  // ============================================
+  // Approval callback handler (v9.5)
+  // ============================================
+
+  private async handleApprovalCallback(chatId: number, userId: string, action: string | undefined): Promise<void> {
+    const service = getTelegramService(this.env);
+    if (!service) return;
+    const csm = this.stateMachine(userId);
+
+    if (action === "approve") {
+      await service.sendMessage(chatId, `✅ *Approved!* Proceeding with deployment...`, { parseMode: "Markdown" });
+      await csm.transition(userId, "DEPLOY_MODE");
+    } else if (action === "reject") {
+      await service.sendMessage(chatId, `❌ *Rejected.* Returning to planning.`, { parseMode: "Markdown" });
+      await csm.transition(userId, "PLAN_MODE");
+    } else if (action === "changes") {
+      await service.sendMessage(chatId, `🔄 *Changes requested.* Builder will revise.`, { parseMode: "Markdown" });
+      await csm.transition(userId, "BUILD_MODE");
+    }
+  }
+
+  // ============================================
+  // Repository Connect — THE FIXED WIZARD
+  // ============================================
+
+  private async handleRepositoryConnect(chatId: number, userId: string, input: string): Promise<void> {
+    const service = getTelegramService(this.env);
+    if (!service) return;
+    const csm = this.stateMachine(userId);
+
+    // Parse URL
+    const trimmed = input.trim();
+    let repoFullName: string | undefined;
+    const shortMatch = trimmed.match(/^([\w.-]+)\/([\w.-]+)$/);
+    if (shortMatch) {
+      repoFullName = `${shortMatch[1]}/${shortMatch[2].replace(/\.git$/, "")}`;
+    } else {
+      const urlMatch = trimmed.match(/^https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)/i);
+      if (urlMatch) {
+        repoFullName = `${urlMatch[1]}/${urlMatch[2].replace(/\.git$/, "")}`;
+      }
+    }
+
+    if (!repoFullName) {
+      await service.sendMessage(
+        chatId,
+        [
+          `❌ *Invalid repository URL*`,
+          ``,
+          `Accepted: \`owner/repo\` or \`https://github.com/owner/repo\``,
+          ``,
+          `_Try again or tap Cancel._`,
+        ].join("\n"),
+        {
+          parseMode: "Markdown",
+          replyMarkup: { inline_keyboard: [[{ text: "🔙 Cancel", callback_data: "home:main" }]] },
+        },
+      );
+      return; // stay in WAITING_REPO_URL state
+    }
+
+    // Transition to VALIDATING_REPO
+    await csm.transition(userId, "VALIDATING_REPO", { repoFullName });
+
+    await service.sendMessage(
+      chatId,
+      [
+        `🔍 *Validating repository...*`,
+        ``,
+        `Repository: \`${repoFullName}\``,
+        ``,
+        `⏳ Checking:`,
+        `• Repository exists`,
+        `• GitHub access`,
+        `• Default branch`,
+        `• Permissions`,
+        `• Language & framework`,
+        `• Size & license`,
+      ].join("\n"),
+      { parseMode: "Markdown" },
+    );
+
+    try {
+      // === Run validator ===
+      const validator = getRepositoryValidator(this.env);
+      const result = await validator.validate(repoFullName);
+
+      // Show validation results
+      await service.sendMessage(chatId, validator.render(result), { parseMode: "Markdown" });
+
+      if (!result.ok) {
+        // Validation failed — return to WAITING_REPO_URL so user can try again
+        await csm.transition(userId, "WAITING_REPO_URL");
+        await service.sendMessage(
+          chatId,
+          [
+            `❌ *Validation failed*`,
+            ``,
+            `${result.error ?? "Unknown error"}`,
+            ``,
+            `Send another repository URL, or tap Cancel.`,
+          ].join("\n"),
+          {
+            parseMode: "Markdown",
+            replyMarkup: { inline_keyboard: [[{ text: "🔙 Cancel", callback_data: "home:main" }]] },
+          },
+        );
+        return;
+      }
+
+      // === Validation passed — connect the repository ===
+      const repoManager = getRepositoryManager(this.env);
+      await repoManager.connect(userId, {
+        repositoryFullName: result.summary.repositoryFullName ?? repoFullName,
+        displayName: repoFullName.split("/").pop() ?? repoFullName,
+        visibility: result.summary.visibility,
+        defaultBranch: result.summary.defaultBranch,
+        language: result.summary.language,
+        size: result.summary.sizeKb,
+      });
+
+      const convMem = getConversationMemory(this.env);
+      await convMem.setActiveRepository(userId, repoFullName);
+      const projectId = `proj_${Date.now()}`;
+      await convMem.setActiveProject(userId, projectId);
+
+      // Transition to PROJECT_CREATED
+      await csm.transition(userId, "PROJECT_CREATED", { projectId, repoFullName });
+
+      const vis = result.summary.visibility === "private" ? "🔒 Private" : "🌐 Public";
+      await service.sendMessage(
+        chatId,
+        [
+          `✅ *Repository Connected Successfully!*`,
+          ``,
+          `*Name:* \`${repoFullName}\``,
+          `*Visibility:* ${vis}`,
+          `*Language:* ${result.summary.language}`,
+          `*Framework:* ${result.summary.framework ?? "Not detected"}`,
+          `*Default branch:* \`${result.summary.defaultBranch}\``,
+          `*Size:* ${(result.summary.sizeKb / 1024).toFixed(1)} MB`,
+          `*License:* ${result.summary.license ?? "None"}`,
+          `*Write access:* ${result.summary.canWrite ? "✅ Yes" : "⚠️ Read-only"}`,
+          ``,
+          `*Project ID:* \`${projectId}\``,
+          ``,
+          `🎉 You can now use /plan to start planning!`,
+        ].join("\n"),
+        {
+          parseMode: "Markdown",
+          replyMarkup: {
+            inline_keyboard: [
+              [
+                { text: "🧠 Plan", callback_data: "home:plan" },
+                { text: "⚒ Build", callback_data: "home:build" },
+              ],
+              [{ text: "🏠 Home", callback_data: "home:main" }],
+            ],
+          },
+        },
+      );
+    } catch (err) {
+      // Error — return to WAITING_REPO_URL
+      await csm.transition(userId, "WAITING_REPO_URL");
+      await service.sendMessage(
+        chatId,
+        [
+          `❌ *Connection failed*`,
+          ``,
+          `Error: ${err instanceof Error ? err.message : String(err)}`,
+          ``,
+          `Send another URL or tap Cancel.`,
+        ].join("\n"),
+        {
+          parseMode: "Markdown",
+          replyMarkup: { inline_keyboard: [[{ text: "🔙 Cancel", callback_data: "home:main" }]] },
+        },
+      );
+    }
   }
 
   // ============================================
@@ -677,7 +809,7 @@ export class TelegramPipeline {
   private async sendWelcome(chatId: number): Promise<void> {
     const service = getTelegramService(this.env);
     if (!service) return;
-    const version = this.env.HADES_VERSION ?? VERSION_FALLBACK;
+    const version = this.getVersion();
 
     const text = [
       `🏛 *Welcome to Hades Army* v${version}`,
@@ -707,26 +839,24 @@ export class TelegramPipeline {
   private async sendHomeScreen(chatId: number, userId: string): Promise<void> {
     const service = getTelegramService(this.env);
     if (!service) return;
-    const version = this.env.HADES_VERSION ?? VERSION_FALLBACK;
+    const version = this.getVersion();
+
+    // Get current state
+    const csm = this.stateMachine(userId);
+    const stateCtx = await csm.getState(userId);
+    const stateMeta = STATE_METADATA[stateCtx.state];
 
     let activeRepo: string | undefined;
-    let activeMode: string = "plan";
     try {
       const convMem = getConversationMemory(this.env);
       const snap = await convMem.getSnapshot(userId);
       activeRepo = snap.activeRepository;
-      activeMode = snap.activeMode ?? "plan";
     } catch {}
-
-    const modeEmoji: Record<string, string> = {
-      plan: "🧠", build: "⚒️", explore: "🔍", analyze: "🔬",
-      review: "🛡️", debug: "🐞", architect: "🏛", chat: "💬",
-    };
 
     const lines: string[] = [
       `🏛 *Hades Army* v${version}`,
       ``,
-      `*Mode:* ${modeEmoji[activeMode] ?? "🧠"} ${activeMode}`,
+      `*State:* ${stateMeta.emoji} ${stateMeta.label}`,
       `*Repository:* ${activeRepo ? `\`${activeRepo}\`` : "none connected"}`,
       ``,
       `_Tap an option below:_`,
@@ -771,6 +901,10 @@ export class TelegramPipeline {
     const service = getTelegramService(this.env);
     if (!service) return;
 
+    const csm = this.stateMachine(userId);
+    const stateCtx = await csm.getState(userId);
+    const stateMeta = STATE_METADATA[stateCtx.state];
+
     let activeRepo: string | undefined;
     try {
       const convMem = getConversationMemory(this.env);
@@ -781,13 +915,12 @@ export class TelegramPipeline {
     const text = [
       `🏠 *Dashboard*`,
       ``,
+      `*State:* ${stateMeta.emoji} ${stateMeta.label}`,
       `*Repository:* ${activeRepo ? `\`${activeRepo}\`` : "none"}`,
       `*Running tasks:* 0`,
       `*Pending approvals:* 0`,
       `*Completed today:* 0`,
       `*Failed today:* 0`,
-      ``,
-      `Tap below for details:`,
     ].join("\n");
 
     await service.sendMessage(chatId, text, {
@@ -808,15 +941,11 @@ export class TelegramPipeline {
     });
   }
 
-  private async showModeSwitcher(chatId: number, _userId: string): Promise<void> {
+  private async showModeSwitcher(chatId: number, userId: string): Promise<void> {
     const service = getTelegramService(this.env);
     if (!service) return;
 
-    const text = [
-      `🎛 *Switch Mode*`,
-      ``,
-      `Select a mode:`,
-    ].join("\n");
+    const text = [`🎛 *Switch Mode*`, ``, `Select a mode:`].join("\n");
 
     const modes: Array<{ emoji: string; label: string; mode: string }> = [
       { emoji: "🧠", label: "Plan", mode: "plan" },
@@ -850,16 +979,18 @@ export class TelegramPipeline {
     });
   }
 
-  private async showSettings(chatId: number, _userId: string): Promise<void> {
+  private async showSettings(chatId: number, userId: string): Promise<void> {
     const service = getTelegramService(this.env);
     if (!service) return;
-    const version = this.env.HADES_VERSION ?? VERSION_FALLBACK;
+    const version = this.getVersion();
+    const csm = this.stateMachine(userId);
+    const stateCtx = await csm.getState(userId);
 
     const text = [
       `⚙ *Settings*`,
       ``,
       `*Version:* ${version}`,
-      `*Mode:* Plan (default)`,
+      `*State:* ${STATE_METADATA[stateCtx.state].label}`,
       ``,
       `Configured:`,
       `• Telegram: ${this.env.TELEGRAM_BOT_TOKEN ? "✅" : "❌"}`,
@@ -873,7 +1004,7 @@ export class TelegramPipeline {
       parseMode: "Markdown",
       replyMarkup: {
         inline_keyboard: [
-          [{ text: "🔄 Reset Memory", callback_data: "home:reset" }],
+          [{ text: "🔄 Reset State", callback_data: "home:reset" }],
           [{ text: "🔙 Home", callback_data: "home:main" }],
         ],
       },
@@ -883,9 +1014,10 @@ export class TelegramPipeline {
   private async sendHelp(chatId: number): Promise<void> {
     const service = getTelegramService(this.env);
     if (!service) return;
+    const version = this.getVersion();
 
     const text = [
-      `❓ *Help*`,
+      `❓ *Help* — v${version}`,
       ``,
       `*Commands:*`,
       `/start — Welcome message`,
@@ -901,7 +1033,7 @@ export class TelegramPipeline {
       `/repositories — Manage repos`,
       `/memory — Memory snapshot`,
       `/health — System health`,
-      `/reset — Clear memory`,
+      `/reset — Reset state + memory`,
       ``,
       `*Channel:* ${CHANNEL_LINK}`,
     ].join("\n");
@@ -928,27 +1060,12 @@ export class TelegramPipeline {
     const service = getTelegramService(this.env);
     if (!service) return;
 
-    const steps: Array<{ title: string; body: string }> = [
-      {
-        title: "Welcome",
-        body: `🏛 *Welcome to Hades Army*\n\nYour autonomous AI software engineering team.\n\n🧠 Manager — plans, decides\n⚒ Builder — generates code\n🛡 Reviewer — validates`,
-      },
-      {
-        title: "Operating Modes",
-        body: `🎛 *8 Modes*\n\nPLAN, BUILD, EXPLORE, ANALYZE, REVIEW, DEBUG, ARCHITECT, CHAT\n\nSwitch anytime with /plan /build etc.`,
-      },
-      {
-        title: "Memory",
-        body: `🧠 *Memory System*\n\nRemembers: architecture, decisions, failures, conventions.\n\nPer-project, persistent.`,
-      },
-      {
-        title: "Connect Repository",
-        body: `🔗 *Connect a Repository*\n\nTap "Connect Repo" from the menu and send the URL.`,
-      },
-      {
-        title: "Ready",
-        body: `✅ *Ready!*\n\nUse /menu to start.\nChannel: ${CHANNEL_LINK}`,
-      },
+    const steps: Array<{ body: string }> = [
+      { body: `🏛 *Welcome to Hades Army*\n\nYour autonomous AI software engineering team.\n\n🧠 Manager — plans, decides\n⚒ Builder — generates code\n🛡 Reviewer — validates` },
+      { body: `🎛 *8 Modes*\n\nPLAN, BUILD, EXPLORE, ANALYZE, REVIEW, DEBUG, ARCHITECT, CHAT\n\nSwitch anytime with /plan /build etc.` },
+      { body: `🧠 *Memory System*\n\nRemembers: architecture, decisions, failures, conventions.\n\nPer-project, persistent.` },
+      { body: `🔗 *Connect a Repository*\n\nTap "Connect Repo" from the menu and send the URL.` },
+      { body: `✅ *Ready!*\n\nUse /menu to start.\nChannel: ${CHANNEL_LINK}` },
     ];
 
     const idx = Math.max(0, Math.min(step - 1, steps.length - 1));
@@ -969,22 +1086,23 @@ export class TelegramPipeline {
   }
 
   // ============================================
-  // Mode switching
+  // Mode switching (uses state machine)
   // ============================================
 
   private async switchMode(chatId: number, userId: string, mode: string): Promise<void> {
     const service = getTelegramService(this.env);
     if (!service) return;
+    const csm = this.stateMachine(userId);
 
-    const modes: Record<string, { emoji: string; label: string; role: string; tagline: string }> = {
-      plan: { emoji: "🧠", label: "Plan", role: "Planner", tagline: "Engineering planning" },
-      build: { emoji: "⚒️", label: "Build", role: "Executor", tagline: "Execute approved plans" },
-      explore: { emoji: "🔍", label: "Explore", role: "Analyst", tagline: "Quick repo exploration" },
-      analyze: { emoji: "🔬", label: "Analyze", role: "Senior Analyst", tagline: "Deep repo analysis" },
-      review: { emoji: "🛡️", label: "Review", role: "Reviewer", tagline: "Review code/PR" },
-      debug: { emoji: "🐞", label: "Debug", role: "Debugger", tagline: "Diagnose failures" },
-      architect: { emoji: "🏛", label: "Architect", role: "Architect", tagline: "Architecture discussion" },
-      chat: { emoji: "💬", label: "Chat", role: "Assistant", tagline: "General conversation" },
+    const modes: Record<string, { emoji: string; label: string; role: string; tagline: string; state: ConversationState }> = {
+      plan: { emoji: "🧠", label: "Plan", role: "Planner", tagline: "Engineering planning", state: "PLAN_MODE" },
+      build: { emoji: "⚒️", label: "Build", role: "Executor", tagline: "Execute approved plans", state: "BUILD_MODE" },
+      explore: { emoji: "🔍", label: "Explore", role: "Analyst", tagline: "Quick repo exploration", state: "HOME" },
+      analyze: { emoji: "🔬", label: "Analyze", role: "Senior Analyst", tagline: "Deep repo analysis", state: "HOME" },
+      review: { emoji: "🛡️", label: "Review", role: "Reviewer", tagline: "Review code/PR", state: "REVIEW_MODE" },
+      debug: { emoji: "🐞", label: "Debug", role: "Debugger", tagline: "Diagnose failures", state: "HOME" },
+      architect: { emoji: "🏛", label: "Architect", role: "Architect", tagline: "Architecture discussion", state: "HOME" },
+      chat: { emoji: "💬", label: "Chat", role: "Assistant", tagline: "General conversation", state: "HOME" },
     };
 
     const m = modes[mode];
@@ -992,6 +1110,9 @@ export class TelegramPipeline {
       await service.sendMessage(chatId, `❌ Unknown mode: ${mode}`, { parseMode: "Markdown" });
       return;
     }
+
+    // Transition to the mode's state
+    await csm.transition(userId, m.state);
 
     try {
       const convMem = getConversationMemory(this.env);
@@ -1006,6 +1127,8 @@ export class TelegramPipeline {
         `_${m.tagline}_`,
         ``,
         `Manager role: *${m.role}*`,
+        ``,
+        `State: ${STATE_METADATA[m.state].emoji} ${STATE_METADATA[m.state].label}`,
       ].join("\n"),
       {
         parseMode: "Markdown",
@@ -1029,124 +1152,6 @@ export class TelegramPipeline {
       await service.sendMessage(chatId, text, { parseMode: "Markdown", replyMarkup });
     } catch (err) {
       await service.sendMessage(chatId, `⚠️ Failed to load repositories: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-
-  // ============================================
-  // Repository connection handler
-  // ============================================
-
-  private async handleRepositoryConnect(chatId: number, userId: string, input: string): Promise<void> {
-    const service = getTelegramService(this.env);
-    if (!service) return;
-
-    // Clear wizard state
-    try {
-      const convMem = getConversationMemory(this.env);
-      await convMem.clearWorkflow(userId);
-    } catch {}
-
-    const trimmed = input.trim();
-    let repoFullName: string | undefined;
-    const shortMatch = trimmed.match(/^([\w.-]+)\/([\w.-]+)$/);
-    if (shortMatch) {
-      repoFullName = `${shortMatch[1]}/${shortMatch[2].replace(/\.git$/, "")}`;
-    } else {
-      const urlMatch = trimmed.match(/^https?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)/i);
-      if (urlMatch) {
-        repoFullName = `${urlMatch[1]}/${urlMatch[2].replace(/\.git$/, "")}`;
-      }
-    }
-
-    if (!repoFullName) {
-      await service.sendMessage(
-        chatId,
-        [
-          `❌ *Invalid repository URL*`,
-          ``,
-          `Accepted: \`owner/repo\` or \`https://github.com/owner/repo\``,
-        ].join("\n"),
-        { parseMode: "Markdown" },
-      );
-      return;
-    }
-
-    await service.sendMessage(
-      chatId,
-      [
-        `🔗 *Connecting...*`,
-        ``,
-        `Repository: \`${repoFullName}\``,
-        `⏳ Validating access...`,
-      ].join("\n"),
-      { parseMode: "Markdown" },
-    );
-
-    try {
-      const repoManager = getRepositoryManager(this.env);
-      const summary = await repoManager.fetchSummary(repoFullName);
-      if (!summary) {
-        await service.sendMessage(
-          chatId,
-          [
-            `❌ *Access failed*`,
-            ``,
-            `Could not access \`${repoFullName}\`.`,
-            `Make sure GITHUB_TOKEN has access.`,
-          ].join("\n"),
-          { parseMode: "Markdown" },
-        );
-        return;
-      }
-
-      await repoManager.connect(userId, {
-        repositoryFullName: summary.repositoryFullName,
-        displayName: summary.displayName,
-        visibility: summary.visibility,
-        defaultBranch: summary.defaultBranch,
-        language: summary.language,
-        size: summary.size,
-      });
-
-      const convMem = getConversationMemory(this.env);
-      await convMem.setActiveRepository(userId, summary.repositoryFullName);
-      const projectId = `proj_${Date.now()}`;
-      await convMem.setActiveProject(userId, projectId);
-
-      const vis = summary.visibility === "private" ? "🔒 Private" : "🌐 Public";
-      await service.sendMessage(
-        chatId,
-        [
-          `✅ *Repository Connected!*`,
-          ``,
-          `*Name:* ${summary.displayName}`,
-          `*Full name:* \`${summary.repositoryFullName}\``,
-          `*Visibility:* ${vis}`,
-          `*Language:* ${summary.language}`,
-          `*Default branch:* \`${summary.defaultBranch}\``,
-          `*Branches:* ${summary.branchesCount}`,
-          `*Stars:* ${summary.starsCount}`,
-          ``,
-          `*Project ID:* \`${projectId}\``,
-        ].join("\n"),
-        {
-          parseMode: "Markdown",
-          replyMarkup: {
-            inline_keyboard: [
-              [
-                { text: "🧠 Plan", callback_data: "home:plan" },
-                { text: "⚒ Build", callback_data: "home:build" },
-              ],
-              [{ text: "🏠 Home", callback_data: "home:main" }],
-            ],
-          },
-        },
-      );
-    } catch (err) {
-      await service.sendMessage(
-        chatId,
-        `❌ Connection failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
     }
   }
 
@@ -1176,9 +1181,13 @@ export class TelegramPipeline {
     try {
       const convMem = getConversationMemory(this.env);
       const snap = await convMem.getSnapshot(userId);
+      const csm = this.stateMachine(userId);
+      const stateCtx = await csm.getState(userId);
+
       const text = [
         `🧠 *Memory Snapshot*`,
         ``,
+        `*State:* ${STATE_METADATA[stateCtx.state].emoji} ${STATE_METADATA[stateCtx.state].label}`,
         `*Active project:* \`${snap.activeProject ?? "(none)"}\``,
         `*Active repository:* \`${snap.activeRepository ?? "(none)"}\``,
         `*Active workflow:* \`${snap.activeWorkflow ?? "(none)"}\``,
@@ -1192,6 +1201,18 @@ export class TelegramPipeline {
     } catch (err) {
       await service.sendMessage(chatId, `⚠️ Memory snapshot failed: ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  // ============================================
+  // Helpers
+  // ============================================
+
+  private getVersion(): string {
+    return this.env.HADES_VERSION ?? VERSION_FALLBACK;
+  }
+
+  private stateMachine(userId: string): ReturnType<typeof getConversationStateMachine> {
+    return getConversationStateMachine(this.env);
   }
 }
 
